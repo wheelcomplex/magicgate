@@ -1,27 +1,27 @@
 package main
 
 import (
-	"bytes"
 	"crypto/tls"
 	"expvar"
 	"flag"
 	"fmt"
 	"log"
+	"magicgate"
 	"net"
 	"os"
 	"strings"
-	"sync"
 
-	"github.com/fasthttp/router"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/expvarhandler"
-	"github.com/valyala/fasthttp/fasthttpadaptor"
 	"github.com/wheelcomplex/certmagic"
+	"github.com/wheelcomplex/fasthttprouter"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/acme"
 )
 
 var (
-	trimwww            = flag.Bool("trimwww", true, "redirect access to www.example.com to example.com")
+	ctlToken           = flag.String("ctltoken", "", "a token to control server from client, URI: /api/ctl/shutdown/*token")
+	trimList           = flag.String("trimlist", "", "redirect www.example.com or blog.example.com to example.com, when --trimlist=www,blog")
 	runProd            = flag.Bool("prod", false, "run on production environment")
 	addr               = flag.String("addr", "0.0.0.0:80", "TCP address to listen for HTTP")
 	addrTLS            = flag.String("addrTLS", "0.0.0.0:443", "TCP address to listen to TLS (aka SSL or HTTPS) requests. Leave empty for disabling TLS")
@@ -31,120 +31,36 @@ var (
 	generateIndexPages = flag.Bool("generateIndexPages", true, "Whether to generate directory index pages")
 	certDir            = flag.String("certdir", "./.magicgate/cert/", "Path to cache cert")
 	vhost              = flag.Bool("vhost", false, "Enables virtual hosting by prepending the requested path with the requested hostname")
-	certDomains        = flag.String("domains", "", "domain list for ssl cert, empty or * for all domains, *.example.com for wildcard sub-domains")
+	certDomains        = flag.String("domains", "", "Domain list for ssl cert, empty or * for all domains, *.example.com for wildcard sub-domains")
+	defaultServerName  = flag.String("defaultservername", "certmagic.default.server.example.com", "Default server name for ssl cert when not servername supply from client")
+	certEmail          = flag.String("certemail", "", "Administrator Email for cert")
 )
 
 var (
-	certDomainList         = []string{} // empty array, not nil
-	certWildcardDomainList = []string{} // empty array, not nil
+	certDomainList         = []string{}
+	certWildcardDomainList = []string{}
+
+	trimPrefixList = [][]byte{}
 )
 
-// RedirectHandler redirect HTTP requests to HTTPS
-type RedirectHandler struct {
-	LastURI string
-	Counter int64
-	mux     sync.Mutex
-}
-
-// HTTPChallengeHandler return a fasthttp.RequestHandler which use for handle ACME HTTP challenge,
-// only requests to "/.well-known/acme-challenge/" should be route to this handler.
-func (h *RedirectHandler) HTTPChallengeHandler(am *certmagic.ACMEManager, next fasthttp.RequestHandler) fasthttp.RequestHandler {
-	httpChallengeHandler := fasthttpadaptor.NewFastHTTPHandler(am.HTTPChallengeHandler(nil))
-	return func(ctx *fasthttp.RequestCtx) {
-		if bytes.HasPrefix(ctx.Path(), []byte("/.well-known/acme-challenge/")) {
-			httpChallengeHandler(ctx)
-			return
-		}
-		if next != nil {
-			next(ctx)
-		}
-	}
-}
-
-// PrefixRedirectHandler return a fasthttp.RequestHandler which trim the prefix from request host and redirect to new host,
-// if prefix not found, will pass request to next handler.
-func (h *RedirectHandler) PrefixRedirectHandler(prefix string, next fasthttp.RequestHandler) fasthttp.RequestHandler {
-	return func(ctx *fasthttp.RequestCtx) {
-
-		log.Printf("PrefixRedirectHandler: %s, (%s <= %s), requested path is %q(%q). LastURI is %q. Counter is %d", prefix, ctx.LocalAddr(), ctx.RemoteAddr(), ctx.Path(), ctx.Request.URI().String(), h.LastURI, h.Counter)
-
-		h.mux.Lock()
-
-		h.LastURI = string(ctx.Path())
-		h.Counter++
-		h.mux.Unlock()
-
-		reqHost := ctx.Host()
-
-		if host := bytes.TrimPrefix(reqHost, []byte(prefix)); bytes.Compare(host, reqHost) != 0 {
-			// Request host has www. prefix. Redirect to host with www. trimmed.
-			// log.Printf("Redirect handler(%s <= %s), requested host: %s, trimmed www.: %s\n", ctx.LocalAddr(), ctx.RemoteAddr(), reqHost, host)
-
-			// https always run on port 443
-			ctx.Redirect(string(ctx.URI().Scheme())+"://"+string(host)+string(ctx.RequestURI()), fasthttp.StatusFound)
-			log.Printf("PrefixRedirectHandler: %s,(%s <= %s), redirected to %q\n", prefix, ctx.LocalAddr(), ctx.RemoteAddr(), string(ctx.URI().Scheme())+"://"+string(host)+string(ctx.RequestURI()))
-			return
-		}
-		if next != nil {
-			next(ctx)
-		}
-		return
-	}
-}
-
-// RedirectToTLSHandler return a fasthttp.RequestHandler which redirect a http request to https
-func (h *RedirectHandler) RedirectToTLSHandler() fasthttp.RequestHandler {
-	return func(ctx *fasthttp.RequestCtx) {
-		log.Printf("RedirectToTLSHandler(%s <= %s), requested path is %q(%q). LastURI is %q. Counter is %d", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.Path(), ctx.Request.URI().String(), h.LastURI, h.Counter)
-
-		// Todo: should we check this ?
-		if bytes.Compare(ctx.URI().Scheme(), []byte("https")) == 0 {
-			log.Fatalf("can not use RedirectToTLSHandler with tls/https requests")
-		}
-
-		h.mux.Lock()
-		h.LastURI = string(ctx.Path())
-		h.Counter++
-		h.mux.Unlock()
-
-		reqHost := ctx.Host()
-
-		var newhost string
-		var err error
-		newhost, _, err = net.SplitHostPort(string(reqHost))
-
-		if err != nil {
-			// not port come with request host
-			newhost = string(reqHost)
-		}
-
-		// https always run on port 443
-		ctx.Redirect("https://"+newhost+string(ctx.RequestURI()), fasthttp.StatusFound)
-		log.Printf("RedirectToTLSHandler(%s <= %s), redirected to %q\n", ctx.LocalAddr(), ctx.RemoteAddr(), "https://"+newhost+string(ctx.RequestURI()))
-		return
-	}
-}
-
-// PrefixTLSRedirectHandler return a fasthttp.RequestHandler which redirect a http request to https, and trim the prefix from request host and redirect to new host,
-// if prefix not found, will pass request to next handler.
-func (h *RedirectHandler) PrefixTLSRedirectHandler(prefix string) fasthttp.RequestHandler {
-	return h.PrefixRedirectHandler(prefix, h.RedirectToTLSHandler())
-}
-
 func main() {
+
+	logger := zap.NewExample()
+	defer logger.Sync()
 
 	// Parse command-line flags.
 	flag.Parse()
 
-	for _, item := range strings.Split(loopReplaceAll(*certDomains, " ", ","), ",") {
+	for _, item := range strings.Split(magicgate.LoopReplaceAll(*certDomains, " ", ","), ",") {
 		if len(item) == 0 {
 			continue
 		}
-		if isAllDotNumber(item) {
+		if magicgate.IsAllDotNumber(item) {
+			log.Printf("CERTDOMAINS, SKIPPED, can not use IP address as tls domain: %s\n", item)
 			continue
 		}
 		if strings.HasPrefix(item, "*.") {
-			item = loopReplaceAll(item, "*.", "")
+			item = magicgate.LoopReplaceAll(item, "*.", "")
 			if len(item) == 0 {
 				continue
 			}
@@ -155,11 +71,29 @@ func main() {
 			certDomainList = append(certDomainList, item)
 		}
 	}
-	for _, oneDomain := range certDomainList {
-		log.Printf("CERTDOMAINS, NORMAL: %s\n", oneDomain)
+	for _, item := range certDomainList {
+		log.Printf("CERTDOMAINS, NORMAL: %s\n", item)
 	}
-	for _, oneDomain := range certWildcardDomainList {
-		log.Printf("CERTDOMAINS, WILDCARD: *%s\n", oneDomain)
+	for _, item := range certWildcardDomainList {
+		log.Printf("CERTDOMAINS, WILDCARD: *%s\n", item)
+	}
+
+	// trimList
+	for _, item := range strings.Split(magicgate.LoopReplaceAll(*trimList, " ", ","), ",") {
+		if len(item) == 0 {
+			continue
+		}
+		if strings.HasSuffix(item, ".") {
+			item = magicgate.LoopReplaceAll(item, ".", "")
+			if len(item) == 0 {
+				continue
+			}
+		}
+		item += "."
+		trimPrefixList = append(trimPrefixList, []byte(item))
+	}
+	for _, item := range trimPrefixList {
+		log.Printf("TRIM HOST PREFIX: %s\n", item)
 	}
 
 	// Setup FS handler
@@ -179,21 +113,6 @@ func main() {
 		fs.PathRewrite = fasthttp.NewVHostPathRewriter(0)
 	}
 	fsHandler := fs.NewRequestHandler()
-
-	// Create RequestHandler serving server stats on /stats and files
-	// on other requested paths.
-	// /stats output may be filtered using regexps. For example:
-	//
-	//   * /stats?r=fs will show only stats (expvars) containing 'fs'
-	//     in their names.
-	// httpRequestHandler := func(ctx *fasthttp.RequestCtx) {
-	// 	path := ctx.Path()
-	// 	if bytes.HasPrefix(path, []byte("/.well-known/acme-challenge/")) {
-	// 		certmagicFastHTTPHandler(ctx)
-	// 	} else {
-	// 		redirectHandler.Handler(ctx)
-	// 	}
-	// }
 
 	// use certmagic default cache
 
@@ -221,15 +140,37 @@ func main() {
 		},
 	}
 
-	certmagic.Default.Storage = &certmagic.FileStorage{Path: *certDir}
+	myCertMagic := certmagic.NewDefault()
 
-	//
-	redirectHandler := &RedirectHandler{
-		Counter: 1,
+	// if the decision function returns an error, a certificate
+	// may not be obtained for that name at that time
+
+	myCertMagic.DefaultServerName = *defaultServerName
+
+	myCertMagic.Storage = &certmagic.FileStorage{Path: *certDir}
+
+	myACME := certmagic.NewACMEManager(myCertMagic, certmagic.ACMEManager{
+		CA:     certmagic.LetsEncryptStagingCA,
+		Email:  *certEmail,
+		Agreed: true,
+		Logger: logger,
+		// plus any other customizations you need
+	})
+
+	if *runProd {
+		log.Printf("certmagic running on LetsEncryptProductionCA\n")
+		myACME.CA = certmagic.LetsEncryptProductionCA
+	} else {
+		log.Printf("certmagic running on LetsEncryptStagingCA\n")
 	}
 
-	// handler ACME and trim www. prefix, and redirect to tls
-	httpRdrHandler := redirectHandler.HTTPChallengeHandler(&certmagic.DefaultACME, redirectHandler.PrefixTLSRedirectHandler("www."))
+	myCertMagic.Issuer = myACME
+
+	//
+	redirectHandler := &magicgate.RedirectHandler{
+		Counter:  1,
+		CtlToken: []byte(*ctlToken),
+	}
 
 	tlsServiceHandler := func(ctx *fasthttp.RequestCtx) {
 		fsHandler(ctx)
@@ -237,25 +178,20 @@ func main() {
 	}
 
 	// trim www. and normal service
-	tlsHandler := redirectHandler.PrefixRedirectHandler("www.", tlsServiceHandler)
+	tlsHandler := redirectHandler.PrefixRedirectHandler(trimPrefixList, tlsServiceHandler)
 
 	// http routing
-	httpRouter := router.New()
+	// handler ACME and trim prefix, and redirect to tls
+	httpRouter := fasthttprouter.New()
 	httpRouter.GET("/stats", expvarhandler.ExpvarHandler)
 	httpRouter.GET("/stat", expvarhandler.ExpvarHandler)
-	httpRouter.GET("/", httpRdrHandler)
+	httpRouter.GET("/.well-known/acme-challenge/*token", redirectHandler.HTTPChallengeHandler(myACME))
+	httpRouter.GET("/", redirectHandler.PrefixTLSRedirectHandler(trimPrefixList))
 
-	tlsRouter := router.New()
+	tlsRouter := fasthttprouter.New()
 	tlsRouter.GET("/stats", expvarhandler.ExpvarHandler)
+	tlsRouter.GET("/api/ctl/shutdown/:token", redirectHandler.ServerControlHandler)
 	tlsRouter.GET("/", tlsHandler)
-
-	//
-	if !*runProd {
-		certmagic.DefaultACME.CA = certmagic.LetsEncryptStagingCA
-		log.Printf("certmagic running on LetsEncryptStagingCA\n")
-	} else {
-		log.Printf("certmagic running on LetsEncryptCA\n")
-	}
 
 	// Start HTTP server.
 	if len(*addr) > 0 {
@@ -305,34 +241,7 @@ func main() {
 	select {}
 }
 
-func certmagicFastHTTPHandler(ctx *fasthttp.RequestCtx) {
-	log.Printf("certmagicFastHTTPHandler: (%s) %s%s\n", ctx.Request.URI().String(), *docRoot, ctx.Path())
-	fmt.Fprintf(ctx, "certmagicFastHTTPHandler: (%s) %s%s\n", ctx.Request.URI().String(), *docRoot, ctx.Path())
-}
-
-// repeatedly replace until nothing changed
-func loopReplaceAll(s, old, new string) string {
-	pre := s
-	for {
-		s = strings.ReplaceAll(s, old, new)
-		if pre == s {
-			return s
-		}
-		pre = s
-	}
-}
-
-// check is the s include only number and . (check ipv4 address)
-func isAllDotNumber(s string) bool {
-	for i := len(s) - 1; i >= 0; i-- {
-		// 0 - 9 and .
-		if (s[i] > 57 || s[i] < 48) && s[i] != '.' {
-			return false
-		}
-	}
-	return true
-}
-
+//
 func updateFSCounters(ctx *fasthttp.RequestCtx) {
 	// Increment the number of fsHandler calls.
 	fsCalls.Add(1)
