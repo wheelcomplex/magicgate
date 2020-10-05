@@ -64,7 +64,7 @@ func main() {
 		if len(item) == 0 {
 			continue
 		}
-		if strings.HasPrefix(item, "*.") || item == "0.0.0.0" {
+		if strings.HasPrefix(item, "*.") {
 			item = magicgate.LoopReplaceAll(item, "*.", "")
 			if len(item) == 0 {
 				continue

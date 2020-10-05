@@ -41,24 +41,24 @@ func (h *ServerImp) DomainACL(name string) error {
 		return nil
 	}
 
+	isIP := IsAllDotNumber(name)
+
 	// Todo: more effection way to check for massive domains
 	for _, oneDomain := range h.Domains {
 		if name == oneDomain {
 			log.Printf("DomainACL, match normal domain: %s\n", name)
 			return nil
 		}
+		if isIP && oneDomain == "0.0.0.0" {
+			log.Printf("DomainACL, match IP(wildcard): %s\n", name)
+			return nil
+		}
 		log.Printf("DomainACL, MISMATCH normal domain (%s): %s\n", oneDomain, name)
 	}
-
-	isIP := IsAllDotNumber(name)
 
 	for _, oneDomain := range h.WildcardDomains {
 		if strings.HasSuffix(name, oneDomain) {
 			log.Printf("DomainACL, match WILDCARD domain (*%s): %s\n", oneDomain, name)
-			return nil
-		}
-		if isIP && oneDomain == "0.0.0.0" {
-			log.Printf("DomainACL, match IP WILDCARD: %s\n", name)
 			return nil
 		}
 		log.Printf("DomainACL, MISMATCH WILDCARD domain (*%s): %s\n", oneDomain, name)
