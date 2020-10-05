@@ -18,7 +18,7 @@
 ## start dlv with app and accept debug client on port 2345
 
 ```bash
-sudo ${GOPATH}/bin//dlv --listen=:2345 --headless=true --accept-multiclient --api-version=2 exec <app binary to debug> [-- app parameters]
+sudo ${GOPATH}/bin//dlv --continue --listen=:2345 --headless=true --log=true --log-output=debugger --accept-multiclient --api-version=2 exec <app binary to debug> [-- app parameters]
 ```
 
 * use sudo to allow app bind to port 443/80
@@ -26,7 +26,7 @@ sudo ${GOPATH}/bin//dlv --listen=:2345 --headless=true --accept-multiclient --ap
 ## example
 
 ```bash
-sudo /home/david/gopkg/bin//dlv --listen=:2345 --headless=true  --accept-multiclient --api-version=2 exec ./magicgate -- --domains="*.example.dev" --addrTLS="0.0.0.0:443" --addr="0.0.0.0:80" --defaultservername=default.example.dev
+sudo /home/david/gopkg/bin/dlv --continue --listen=:2345 --headless=true --log=true --log-output=debugger --accept-multiclient --api-version=2 exec ./magicgate -- --domains="*.example.dev" --addrTLS="0.0.0.0:443" --addr="0.0.0.0:80" --defaultservername=default.example.dev --trimlist="www.,default."
 ```
 
 ## create launch.json for vscode debug

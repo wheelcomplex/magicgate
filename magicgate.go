@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/caddyserver/certmagic"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/fasthttpadaptor"
-	"github.com/wheelcomplex/certmagic"
 )
 
 // RedirectHandler redirect HTTP requests to HTTPS
@@ -26,10 +27,26 @@ type RedirectHandler struct {
 
 // HTTPChallengeHandler return a fasthttp.RequestHandler which use for handle ACME HTTP challenge,
 // only requests to "/.well-known/acme-challenge/" should be route to this handler.
-func (h *RedirectHandler) HTTPChallengeHandler(am *certmagic.ACMEManager) fasthttp.RequestHandler {
-	httpChallengeHandler := fasthttpadaptor.NewFastHTTPHandler(am.HTTPChallengeHandler(nil))
+func (h *RedirectHandler) HTTPChallengeHandler(am *certmagic.ACMEManager, next http.HandlerFunc) fasthttp.RequestHandler {
+	mux := http.NewServeMux()
+	if next == nil {
+		// use default handler
+		next = func(w http.ResponseWriter, req *http.Request) {
+			scheme := req.Header.Get("x-fasthttp-scheme")
+			if len(scheme) == 0 {
+				scheme = "http"
+			}
+			msg := fmt.Sprintf("httpChallengeLogger: unhandled ACME HTTP Challenge request, remote address %s, URL %s\n", req.RemoteAddr, scheme+"://"+req.Host+req.URL.String())
+			fmt.Fprintf(w, msg)
+			log.Printf(msg)
+
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}
+	mux.HandleFunc("/", next)
+	httpChallengeHandler := fasthttpadaptor.NewFastHTTPHandler(am.HTTPChallengeHandler(mux))
 	return func(ctx *fasthttp.RequestCtx) {
-		log.Printf("HTTPChallengeHandler: (%s <= %s), token: %s, requested path is %q(%q). LastURI is %q. Counter is %d", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.UserValue("token"), ctx.Path(), ctx.Request.URI().String(), h.LastURI, h.Counter)
+		log.Printf("HTTPChallengeHandler: (%s <= %s), token: %s, URL %q(%q). LastURI is %q. Counter is %d", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.UserValue("token"), ctx.Path(), ctx.Request.URI().String(), h.LastURI, h.Counter)
 
 		h.mux.Lock()
 
@@ -57,14 +74,15 @@ func (h *RedirectHandler) PrefixRedirectHandler(prefixList [][]byte, next fastht
 		reqHost := ctx.Host()
 
 		for _, prefix := range prefixList {
+			log.Printf("PrefixRedirectHandler: trim %s vs req %s, (%s <= %s)\n", prefix, reqHost, ctx.LocalAddr(), ctx.RemoteAddr())
 			if host := bytes.TrimPrefix(reqHost, prefix); bytes.Compare(host, reqHost) != 0 {
 				// Request host has www. prefix. Redirect to host with www. trimmed.
 
 				ctx.Redirect(string(ctx.URI().Scheme())+"://"+string(host)+string(ctx.RequestURI()), fasthttp.StatusFound)
+				ctx.SetUserValue("MagicRedirect", prefix)
 				log.Printf("PrefixRedirectHandler: trim %s, (%s <= %s), redirected to %q\n", prefix, ctx.LocalAddr(), ctx.RemoteAddr(), string(ctx.URI().Scheme())+"://"+string(host)+string(ctx.RequestURI()))
 				return
 			}
-
 		}
 
 		if next != nil {
@@ -102,6 +120,7 @@ func (h *RedirectHandler) RedirectToTLSHandler() fasthttp.RequestHandler {
 
 		// https always run on port 443
 		ctx.Redirect("https://"+newhost+string(ctx.RequestURI()), fasthttp.StatusFound)
+		ctx.SetUserValue("MagicRedirect", "tls")
 		log.Printf("RedirectToTLSHandler(%s <= %s), redirected to %q\n", ctx.LocalAddr(), ctx.RemoteAddr(), "https://"+newhost+string(ctx.RequestURI()))
 		return
 	}
@@ -111,6 +130,23 @@ func (h *RedirectHandler) RedirectToTLSHandler() fasthttp.RequestHandler {
 // if prefix not found, will pass request to next handler.
 func (h *RedirectHandler) PrefixTLSRedirectHandler(prefixList [][]byte) fasthttp.RequestHandler {
 	return h.PrefixRedirectHandler(prefixList, h.RedirectToTLSHandler())
+}
+
+// MagicRedirectHandler return a fasthttp.RequestHandler which call redirect handler and return on redirected,
+// otherwise call next
+func (h *RedirectHandler) MagicRedirectHandler(redirect, next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		redirect(ctx)
+		rdr := ctx.UserValue("MagicRedirect")
+		if rdr != nil {
+			log.Printf("MagicRedirectHandler: %s, (%s <= %s)\n", rdr.([]byte), ctx.LocalAddr(), ctx.RemoteAddr())
+			return
+		}
+		if next != nil {
+			next(ctx)
+		}
+		return
+	}
 }
 
 // ServerControlHandler process shutdown command from remote

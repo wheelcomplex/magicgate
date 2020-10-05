@@ -11,10 +11,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/buaazp/fasthttprouter"
+	"github.com/caddyserver/certmagic"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/expvarhandler"
-	"github.com/wheelcomplex/certmagic"
-	"github.com/wheelcomplex/fasthttprouter"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/acme"
 )
@@ -97,16 +97,20 @@ func main() {
 	}
 
 	// Setup FS handler
+
+	fsPathNotFoundHandler := func(ctx *fasthttp.RequestCtx) {
+		// you may want to do more here
+		fmt.Fprintf(ctx, "Requested URI (%q) NOT FOUND: %q", ctx.Request.URI().String(), ctx.Path())
+		log.Printf("Requested URI NOT FOUND: (%s) %s%s\n", ctx.Request.URI().String(), *docRoot, ctx.Path())
+	}
+
 	fs := &fasthttp.FS{
 		Root:               *docRoot,
 		IndexNames:         []string{"index.html"},
 		GenerateIndexPages: *generateIndexPages,
 		Compress:           *compress,
 		AcceptByteRange:    *byteRange,
-		PathNotFound: func(ctx *fasthttp.RequestCtx) {
-			fmt.Fprintf(ctx, "Requested URI (%q) NOT FOUND: %q", ctx.Request.URI().String(), ctx.Path())
-			// log.Printf("Requested URI NOT FOUND: (%s) %s%s\n", ctx.Request.URI().String(), *docRoot, ctx.Path())
-		},
+		PathNotFound:       fsPathNotFoundHandler,
 	}
 
 	if *vhost {
@@ -172,26 +176,34 @@ func main() {
 		CtlToken: []byte(*ctlToken),
 	}
 
+	// http routing
+	// handler ACME or redirect to tls
+	httpRouter := fasthttprouter.New()
+	httpRouter.GET("/stats", expvarhandler.ExpvarHandler)
+	httpRouter.GET("/stat", expvarhandler.ExpvarHandler)
+	httpRouter.GET("/.well-known/acme-challenge/*token", redirectHandler.HTTPChallengeHandler(myACME, nil))
+	// catch-all to redirect
+	httpRouter.NotFound = redirectHandler.RedirectToTLSHandler()
+	// or trim prefix and redirect to tls
+	// httpRouter.NotFound = redirectHandler.PrefixTLSRedirectHandler(trimPrefixList)
+
+	//
 	tlsServiceHandler := func(ctx *fasthttp.RequestCtx) {
 		fsHandler(ctx)
 		updateFSCounters(ctx)
 	}
 
-	// trim www. and normal service
-	tlsHandler := redirectHandler.PrefixRedirectHandler(trimPrefixList, tlsServiceHandler)
-
-	// http routing
-	// handler ACME and trim prefix, and redirect to tls
-	httpRouter := fasthttprouter.New()
-	httpRouter.GET("/stats", expvarhandler.ExpvarHandler)
-	httpRouter.GET("/stat", expvarhandler.ExpvarHandler)
-	httpRouter.GET("/.well-known/acme-challenge/*token", redirectHandler.HTTPChallengeHandler(myACME))
-	httpRouter.GET("/", redirectHandler.PrefixTLSRedirectHandler(trimPrefixList))
-
 	tlsRouter := fasthttprouter.New()
+	tlsRouter.GET("/.well-known/acme-challenge/*token", redirectHandler.HTTPChallengeHandler(myACME, nil))
 	tlsRouter.GET("/stats", expvarhandler.ExpvarHandler)
 	tlsRouter.GET("/api/ctl/shutdown/:token", redirectHandler.ServerControlHandler)
-	tlsRouter.GET("/", tlsHandler)
+	// catch-all to trim prefix or service
+	tlsRouter.NotFound = tlsServiceHandler
+
+	// try to redirect first and goto router
+	// tlsRouterHandler := redirectHandler.MagicRedirectHandler(redirectHandler.PrefixRedirectHandler(trimPrefixList, nil), tlsRouter.Handler)
+	// or redirect without magic redirect info
+	tlsRouterHandler := redirectHandler.PrefixRedirectHandler(trimPrefixList, tlsRouter.Handler)
 
 	// Start HTTP server.
 	if len(*addr) > 0 {
@@ -229,7 +241,7 @@ func main() {
 
 		lnTLS := tls.NewListener(ln, cfg)
 		go func() {
-			if err := fasthttp.Serve(lnTLS, tlsRouter.Handler); err != nil {
+			if err := fasthttp.Serve(lnTLS, tlsRouterHandler); err != nil {
 				panic(err)
 			}
 		}()
