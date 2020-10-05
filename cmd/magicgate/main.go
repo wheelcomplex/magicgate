@@ -1,4 +1,8 @@
+// A multiple function gateway include http/https/dns server with auto let's encrypt (by certmagic)
+
 package main
+
+// Todo: alt http port as a backend for reverse proxy, dns challenge, reverse proxy
 
 import (
 	"crypto/tls"
@@ -24,6 +28,7 @@ var (
 	trimList           = flag.String("trimlist", "", "redirect www.example.com or blog.example.com to example.com, when --trimlist=www,blog")
 	runProd            = flag.Bool("prod", false, "run on production environment")
 	addr               = flag.String("addr", "0.0.0.0:80", "TCP address to listen for HTTP")
+	addrAlt            = flag.String("addralt", "0.0.0.0:9080", "alternate TCP address to listen for HTTP, as backend for reverse proxy")
 	addrTLS            = flag.String("addrTLS", "0.0.0.0:443", "TCP address to listen to TLS (aka SSL or HTTPS) requests. Leave empty for disabling TLS")
 	byteRange          = flag.Bool("byteRange", true, "Enables byte range requests if set to true")
 	compress           = flag.Bool("compress", true, "Enables transparent response compression if set to true")
@@ -194,7 +199,6 @@ func main() {
 	}
 
 	tlsRouter := fasthttprouter.New()
-	tlsRouter.GET("/.well-known/acme-challenge/*token", redirectHandler.HTTPChallengeHandler(myACME, nil))
 	tlsRouter.GET("/stats", expvarhandler.ExpvarHandler)
 	tlsRouter.GET("/api/ctl/shutdown/:token", redirectHandler.ServerControlHandler)
 	// catch-all to trim prefix or service
@@ -216,9 +220,21 @@ func main() {
 		}()
 	}
 
+	// alternate HTTP server, use tlsServiceHandler
+	if len(*addrAlt) > 0 {
+		log.Printf("Starting Alternate HTTP server on %q", *addrAlt)
+
+		go func() {
+			if err := fasthttp.ListenAndServe(*addrAlt, tlsServiceHandler); err != nil {
+				log.Fatalf("error in ListenAndServe: %s", err)
+			}
+		}()
+	}
+
 	// Start HTTPS server.
 	if len(*addrTLS) > 0 {
 		log.Printf("Starting HTTPS server on %q", *addrTLS)
+
 		if err := os.MkdirAll(*certDir, 0700); err != nil {
 			log.Fatalf("error in create cert dir: %s", err)
 		}
