@@ -37,15 +37,8 @@ var (
 	certDir            = flag.String("certdir", "./.magicgate/cert/", "Path to cache cert")
 	vhost              = flag.Bool("vhost", false, "Enables virtual hosting by prepending the requested path with the requested hostname")
 	certDomains        = flag.String("domains", "", "Domain list for ssl cert, empty or * for all domains, *.example.com for wildcard sub-domains")
-	defaultServerName  = flag.String("defaultservername", "certmagic.default.server.example.com", "Default server name for ssl cert when not servername supply from client")
+	defaultServerName  = flag.String("defaultservername", "", "Default server name for ssl cert when not servername supply from client")
 	certEmail          = flag.String("certemail", "", "Administrator Email for cert")
-)
-
-var (
-	certDomainList         = []string{}
-	certWildcardDomainList = []string{}
-
-	trimPrefixList = [][]byte{}
 )
 
 func main() {
@@ -56,15 +49,22 @@ func main() {
 	// Parse command-line flags.
 	flag.Parse()
 
-	for _, item := range strings.Split(magicgate.LoopReplaceAll(*certDomains, " ", ","), ",") {
+	var (
+		certDomainList         = []string{}
+		certWildcardDomainList = []string{}
+
+		trimPrefixList = [][]byte{}
+	)
+
+	// Todo: move args processing to ServerImp init
+
+	// make default server name available
+	allDomains := *certDomains + "," + *defaultServerName
+	for _, item := range strings.Split(magicgate.LoopReplaceAll(allDomains, " ", ","), ",") {
 		if len(item) == 0 {
 			continue
 		}
-		if magicgate.IsAllDotNumber(item) {
-			log.Printf("CERTDOMAINS, SKIPPED, can not use IP address as tls domain: %s\n", item)
-			continue
-		}
-		if strings.HasPrefix(item, "*.") {
+		if strings.HasPrefix(item, "*.") || item == "0.0.0.0" {
 			item = magicgate.LoopReplaceAll(item, "*.", "")
 			if len(item) == 0 {
 				continue
@@ -101,6 +101,17 @@ func main() {
 		log.Printf("TRIM HOST PREFIX: %s\n", item)
 	}
 
+	//
+	srv := &magicgate.ServerImp{
+		Counter:           1,
+		CtlToken:          []byte(*ctlToken),
+		Domains:           certDomainList,
+		WildcardDomains:   certWildcardDomainList,
+		DefaultServerName: *defaultServerName,
+		TrimList:          trimPrefixList,
+		// Todo: add command line flags
+	}
+
 	// Setup FS handler
 
 	fsPathNotFoundHandler := func(ctx *fasthttp.RequestCtx) {
@@ -128,25 +139,7 @@ func main() {
 	// if the decision function returns an error, a certificate
 	// may not be obtained for that name at that time
 	certmagic.Default.OnDemand = &certmagic.OnDemandConfig{
-		DecisionFunc: func(name string) error {
-			// Todo: more effection way to check for massive domains
-			for _, oneDomain := range certDomainList {
-				if name == oneDomain {
-					log.Printf("certmagic, DecisionFunc match normal domain: %s\n", name)
-					return nil
-				}
-				log.Printf("certmagic, DecisionFunc MISMATCH normal domain (%s): %s\n", oneDomain, name)
-			}
-			for _, oneDomain := range certWildcardDomainList {
-				if strings.HasSuffix(name, oneDomain) {
-					log.Printf("certmagic, DecisionFunc match WILDCARD domain (*%s): %s\n", oneDomain, name)
-					return nil
-				}
-				log.Printf("certmagic, DecisionFunc MISMATCH WILDCARD domain (*%s): %s\n", oneDomain, name)
-			}
-			log.Printf("certmagic, DecisionFunc not allowed domain: %s\n", name)
-			return fmt.Errorf("certmagic, not allowed domain: %s", name)
-		},
+		DecisionFunc: srv.DomainACLNoIP,
 	}
 
 	myCertMagic := certmagic.NewDefault()
@@ -175,46 +168,40 @@ func main() {
 
 	myCertMagic.Issuer = myACME
 
-	//
-	redirectHandler := &magicgate.RedirectHandler{
-		Counter:  1,
-		CtlToken: []byte(*ctlToken),
-	}
-
 	// http routing
 	// handler ACME or redirect to tls
 	httpRouter := fasthttprouter.New()
 	httpRouter.GET("/stats", expvarhandler.ExpvarHandler)
 	httpRouter.GET("/stat", expvarhandler.ExpvarHandler)
-	httpRouter.GET("/.well-known/acme-challenge/*token", redirectHandler.HTTPChallengeHandler(myACME, nil))
+	httpRouter.GET("/.well-known/acme-challenge/*token", srv.HTTPChallengeHandler(myACME, nil))
 	// catch-all to redirect
-	httpRouter.NotFound = redirectHandler.RedirectToTLSHandler()
+	httpRouter.NotFound = srv.RedirectToTLSHandler()
 	// or trim prefix and redirect to tls
-	// httpRouter.NotFound = redirectHandler.PrefixTLSRedirectHandler(trimPrefixList)
+	// httpRouter.NotFound = srv.PrefixTLSRedirectHandler()
 
-	//
-	tlsServiceHandler := func(ctx *fasthttp.RequestCtx) {
+	// check domain acl
+	tlsServiceHandler := srv.ServerHandler(func(ctx *fasthttp.RequestCtx) {
 		fsHandler(ctx)
 		updateFSCounters(ctx)
-	}
+	})
 
 	tlsRouter := fasthttprouter.New()
 	tlsRouter.GET("/stats", expvarhandler.ExpvarHandler)
-	tlsRouter.GET("/api/ctl/shutdown/:token", redirectHandler.ServerControlHandler)
+	tlsRouter.GET("/api/ctl/shutdown/:token", srv.ServerControlHandler)
 	// catch-all to trim prefix or service
 	tlsRouter.NotFound = tlsServiceHandler
 
 	// try to redirect first and goto router
-	// tlsRouterHandler := redirectHandler.MagicRedirectHandler(redirectHandler.PrefixRedirectHandler(trimPrefixList, nil), tlsRouter.Handler)
+	// tlsRouterHandler := srv.MagicServerImp(srv.PrefixRedirectHandler(nil), tlsRouter.Handler)
 	// or redirect without magic redirect info
-	tlsRouterHandler := redirectHandler.PrefixRedirectHandler(trimPrefixList, tlsRouter.Handler)
+	tlsRouterHandler := srv.PrefixRedirectHandler(tlsRouter.Handler)
 
 	// Start HTTP server.
 	if len(*addr) > 0 {
 		log.Printf("Starting HTTP server on %q", *addr)
 
 		go func() {
-			if err := fasthttp.ListenAndServe(*addr, httpRouter.Handler); err != nil {
+			if err := fasthttp.ListenAndServe(*addr, srv.ServerHandler(httpRouter.Handler)); err != nil {
 				log.Fatalf("error in ListenAndServe: %s", err)
 			}
 		}()
