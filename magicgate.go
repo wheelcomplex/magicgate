@@ -155,7 +155,7 @@ func (h *ServerImp) DomainACL(name string) error {
 	// Todo: use map[host]bool to storage single host list
 	for _, oneDomain := range h.Domains {
 		if name == oneDomain {
-			log.Printf("DomainACL, match normal domain: %s\n", name)
+			// log.Printf("DomainACL, match normal domain: %s\n", name)
 			return nil
 		}
 
@@ -270,7 +270,7 @@ func (h *ServerImp) PrefixRedirectHandler(next fasthttp.RequestHandler) fasthttp
 		reqHost := ctx.Host()
 
 		for _, prefix := range h.TrimList {
-			log.Printf("PrefixRedirectHandler: trim %s vs req %s, (%s <= %s)\n", prefix, reqHost, ctx.LocalAddr(), ctx.RemoteAddr())
+			// log.Printf("PrefixRedirectHandler: trim %s vs req %s, (%s <= %s)\n", prefix, reqHost, ctx.LocalAddr(), ctx.RemoteAddr())
 			if host := bytes.TrimPrefix(reqHost, prefix); bytes.Compare(host, reqHost) != 0 {
 				// Request host has www. prefix. Redirect to host with www. trimmed.
 
