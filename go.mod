@@ -14,6 +14,10 @@ go 1.16
 
 replace github.com/valyala/fasthttp v1.16.0 => /home/david/home/wheelcomplex/fasthttp
 
+replace github.com/caddyserver/certmagic v0.12.0 => /home/david/home/wheelcomplex/magicgate/certmagic
+
+replace github.com/wheelcomplex/certmagic v0.12.0 => /home/david/home/wheelcomplex/magicgate/certmagic
+
 require (
 	github.com/buaazp/fasthttprouter v0.1.1
 	github.com/caddyserver/certmagic v0.12.0

@@ -190,7 +190,14 @@ func main() {
 	}
 	fsHandler := fs.NewRequestHandler()
 
-	// use certmagic default cache
+	// setup in DefaultACME
+	certmagic.DefaultACME.Email = *certEmail
+
+	certmagic.DefaultACME.Agreed = true
+
+	certmagic.DefaultACME.Logger = logger
+
+	certmagic.DefaultACME.CA = certmagic.LetsEncryptStagingCA
 
 	// if the decision function returns an error, a certificate
 	// may not be obtained for that name at that time
@@ -198,38 +205,50 @@ func main() {
 		DecisionFunc: srv.DomainACLNoIP,
 	}
 
-	myCertMagic := certmagic.NewDefault()
+	certmagic.Default.DefaultServerName = *defaultServerName
+	certmagic.Default.Logger = logger
 
-	// if the decision function returns an error, a certificate
-	// may not be obtained for that name at that time
+	certmagic.Default.Storage = &certmagic.FileStorage{Path: *certDir}
 
-	myCertMagic.DefaultServerName = *defaultServerName
+	certmagic.Default.OnEvent = func(event string, data interface{}) {
+		log.Printf("certmagic.Default.OnEvent: %s, %v\n", event, data)
+	}
 
-	myCertMagic.Storage = &certmagic.FileStorage{Path: *certDir}
+	// get my certmagic.Config from default
+	myConfig := certmagic.NewDefault()
 
-	myACME := certmagic.NewACMEManager(myCertMagic, certmagic.ACMEManager{
-		CA:     certmagic.LetsEncryptStagingCA,
-		Email:  *certEmail,
-		Agreed: true,
-		Logger: logger,
-		// plus any other customizations you need
-	})
+	myConfig.DefaultServerName = *defaultServerName
+
+	// certmagic.DefaultACME
+	// myACMEManager := certmagic.NewACMEManager(myConfig, certmagic.ACMEManager{
+	// 	CA:     certmagic.LetsEncryptStagingCA,
+	// 	Email:  *certEmail,
+	// 	Agreed: true,
+	// 	Logger: logger,
+	// 	// plus any other customizations you need
+	// })
+
+	myACMEManager := certmagic.NewACMEManager(myConfig, certmagic.DefaultACME)
+
+	myConfig.Issuer = myACMEManager
+
+	log.Printf("myACMEManager: \n%V\n", myACMEManager)
+
+	log.Printf("myConfig: \n%V\n", myConfig)
 
 	if *runProd {
 		log.Printf("certmagic running on LetsEncryptProductionCA\n")
-		myACME.CA = certmagic.LetsEncryptProductionCA
+		myACMEManager.CA = certmagic.LetsEncryptProductionCA
 	} else {
 		log.Printf("certmagic running on LetsEncryptStagingCA\n")
 	}
-
-	myCertMagic.Issuer = myACME
 
 	// http routing
 	// handler ACME or redirect to tls
 	httpRouter := fasthttprouter.New()
 	httpRouter.GET("/stats", expvarhandler.ExpvarHandler)
 	httpRouter.GET("/stat", expvarhandler.ExpvarHandler)
-	httpRouter.GET("/.well-known/acme-challenge/*token", srv.HTTPChallengeHandler(myACME, nil))
+	httpRouter.GET("/.well-known/acme-challenge/*token", srv.HTTPChallengeHandler(myACMEManager, nil))
 	// catch-all to redirect
 	httpRouter.NotFound = srv.RedirectToTLSHandler()
 	// or trim prefix and redirect to tls
@@ -289,7 +308,7 @@ func main() {
 		// TLS specific general settings
 		cfg := &tls.Config{
 			MinVersion:     tls.VersionTLS12,
-			GetCertificate: certmagic.NewDefault().GetCertificate,
+			GetCertificate: myConfig.GetCertificate,
 			NextProtos: []string{
 				"http/1.1", acme.ALPNProto,
 			},
