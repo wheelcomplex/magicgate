@@ -1,5 +1,27 @@
+/ref/
 cmd/magicgate/.magicgate/
 cmd/magicgate/debug.sh
 cmd/magicgate/magicgate
 vsdir/
 .vscode/
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+.DS_Store
+
+# Test binary, build with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+vendor/
+.vscode/
+.idea/
+testdata
+
+node_modules/
+package-lock.json
+*.prof

@@ -2,7 +2,7 @@
 
 package main
 
-// Todo: alt http port as a backend for reverse proxy, dns challenge, reverse proxy
+// Todo: alt http port as a backend for reverse proxy, dns challenge, reverse proxy, remote ip register
 
 import (
 	"crypto/tls"
@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"magicgate"
+	"magicgate/dnsmagic/dyndns"
 	"net"
 	"os"
 	"strings"
@@ -24,7 +25,7 @@ import (
 )
 
 var (
-	ctlToken           = flag.String("ctltoken", "", "a token to control server from client, URI: /api/ctl/shutdown/*token")
+	ctrlToken          = flag.String("ctrltoken", "", "a token to control server from client, URI: /api/ctrl/shutdown/*token")
 	trimList           = flag.String("trimlist", "", "redirect www.example.com or blog.example.com to example.com, when --trimlist=www,blog")
 	runProd            = flag.Bool("prod", false, "run on production environment")
 	addr               = flag.String("addr", "0.0.0.0:80", "TCP address to listen for HTTP")
@@ -39,6 +40,7 @@ var (
 	certDomains        = flag.String("domains", "", "Domain list for ssl cert, empty or * for all domains, *.example.com for wildcard sub-domains")
 	defaultServerName  = flag.String("defaultservername", "", "Default server name for ssl cert when not servername supply from client")
 	certEmail          = flag.String("certemail", "", "Administrator Email for cert")
+	apiTokens          = flag.String("apitoken", "gentoken", "api token list: '<token>:[name],<token>:[name]', if use 'gentoken' will generate 16 tokens for content register")
 )
 
 func main() {
@@ -101,16 +103,70 @@ func main() {
 		log.Printf("TRIM HOST PREFIX: %s\n", item)
 	}
 
+	var err error
+
+	if len(*ctrlToken) == 0 {
+		*ctrlToken, err = magicgate.RandToken(16)
+		if err != nil {
+			log.Fatalf("Generate server control token failed: %v\n", err)
+		}
+	}
+	*ctrlToken = strings.ToLower(*ctrlToken)
+	log.Printf("SERVER CONTROL TOKEN: %s\n", *ctrlToken)
+
+	tokens := map[string]string{}
+
+	if *apiTokens == "gentoken" {
+		for i := 0; i < 16; i++ {
+			*apiTokens, err = magicgate.RandToken(16)
+			if err != nil {
+				log.Fatalf("Generate api token failed: %v\n", err)
+			}
+			*apiTokens = strings.ToLower(*apiTokens)
+			tokens[*apiTokens] = "auto-api-" + fmt.Sprintf("%d", i)
+			log.Printf("API TOKEN#%d: %s, %s\n", i, *apiTokens, tokens[*apiTokens])
+
+		}
+	} else {
+		var tk, name string
+		var cnt int
+		*apiTokens = magicgate.LoopReplaceAll(*apiTokens, " ", "_")
+		for _, item := range strings.Split(*apiTokens, ",") {
+			if len(item) == 0 {
+				continue
+			}
+			tmp := strings.Split(item, ":")
+			if len(tmp) == 0 {
+				log.Printf("Invalid API TOKEN: %s\n", item)
+				continue
+			}
+			cnt++
+			if len(tmp) == 1 {
+				tk = strings.ToLower(tmp[0])
+				name = "api-" + fmt.Sprintf("%d", cnt)
+			} else {
+				// len > 1
+				tk = strings.ToLower(tmp[0])
+				name = tmp[1]
+			}
+			log.Printf("API TOKEN#%d: %s, %s\n", cnt, tk, name)
+			tokens[tk] = name
+		}
+	}
+
 	//
 	srv := &magicgate.ServerImp{
 		Counter:           1,
-		CtlToken:          []byte(*ctlToken),
+		CtrlToken:         []byte(*ctrlToken),
 		Domains:           certDomainList,
 		WildcardDomains:   certWildcardDomainList,
 		DefaultServerName: *defaultServerName,
 		TrimList:          trimPrefixList,
 		// Todo: add command line flags
 	}
+
+	//
+	register := dyndns.NewRegisterServerImp(tokens)
 
 	// Setup FS handler
 
@@ -187,7 +243,11 @@ func main() {
 
 	tlsRouter := fasthttprouter.New()
 	tlsRouter.GET("/stats", expvarhandler.ExpvarHandler)
-	tlsRouter.GET("/api/ctl/shutdown/:token", srv.ServerControlHandler)
+	tlsRouter.GET("/api/ctrl/shutdown/:token", srv.ServerControlHandler)
+
+	tlsRouter.GET("/api/register/set/:token/:value", register.RegisterHandler())
+	tlsRouter.GET("/api/register/list/:token", register.JSONContentHandler())
+
 	// catch-all to trim prefix or service
 	tlsRouter.NotFound = tlsServiceHandler
 

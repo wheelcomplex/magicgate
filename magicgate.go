@@ -18,19 +18,129 @@ import (
 	"github.com/valyala/fasthttp/fasthttpadaptor"
 )
 
+// HostStat record stat of a backend host
+type HostStat struct {
+}
+
+// BackendList for reverse proxy
+// <*|*.example.com|example.com>@10.0.0.2:9080:tls/be1.example.com:9080^iphash,
+// target@backendlist^load‑balancing methods,[more target section],
+// tls mark in backend list means connect to backend by tls
+type BackendList struct {
+	target     []byte           // the URI.HOST which client accessing, etc example.com or *.example.com or ip or 0.0.0.0, * means all
+	hosts      [][]byte         // the backend host/ip list
+	policy     []byte           // load‑balancing methods, roundrobin, IP hash, URI partent hash, random
+	aliveHosts map[int]HostStat // hosts index as key
+}
+
+// NewBackendList return an initialed *backendList
+func NewBackendList() *BackendList {
+	return &BackendList{
+		target:     make([]byte, 0),
+		hosts:      make([][]byte, 0),
+		policy:     make([]byte, 0),
+		aliveHosts: make(map[int]HostStat),
+	}
+}
+
+// NewBackendListFromArgs parse input args and return *backendList
+func NewBackendListFromArgs(backendArgs string) *BackendList {
+	be := NewBackendList()
+	be.AddBackendArgs(backendArgs)
+	return be
+}
+
+// AddBackendArgs add more backend to backendList
+func (be *BackendList) AddBackendArgs(backendArgs string) error {
+
+	return nil
+}
+
+// Todo: server ctrl, sync gate certs (storage dir) to authenticated client, for reverse proxy by tls
+
 // ServerImp redirect HTTP requests to HTTPS
 type ServerImp struct {
-	LastURI  string
-	Counter  int64
-	CtlToken []byte
+	LastURI string
+	Counter int64
+
+	CtrlToken []byte
+
+	NormalHostSwitch   map[string]fasthttp.RequestHandler
+	WildcardHostSwitch map[string]fasthttp.RequestHandler
 
 	Domains           []string
 	WildcardDomains   []string
 	DefaultServerName string
 	TrimList          [][]byte
+	Backends          *BackendList
 	// Todo: add command line flags
 
 	mux sync.Mutex
+}
+
+// MatchHostHandler do handler matching on access host,
+// will return nil for mismatch.
+func (h *ServerImp) MatchHostHandler(name string) fasthttp.RequestHandler {
+
+	if len(h.NormalHostSwitch) == 0 && len(h.WildcardHostSwitch) == 0 {
+		log.Printf("MatchHostHandler, handler switch is empty for %s\n", name)
+		return nil
+	}
+
+	// normal/single host
+	if handler := h.NormalHostSwitch[name]; handler != nil {
+		log.Printf("MatchHostHandler, match normal host: %s\n", name)
+		return handler
+	}
+
+	// wildcard ip
+	if handler := h.NormalHostSwitch["0.0.0.0"]; handler != nil && IsAllDotNumber(name) {
+		log.Printf("MatchHostHandler, match wildcard ip host: %s\n", name)
+		return handler
+	}
+
+	for oneDomain, handler := range h.WildcardHostSwitch {
+		if strings.HasSuffix(name, oneDomain) {
+			log.Printf("MatchHostHandler, match WILDCARD host (*%s): %s\n", oneDomain, name)
+			return handler
+		}
+	}
+	log.Printf("MatchHostHandler, host mismatch: %s\n", name)
+	return nil
+}
+
+// Todo: test ServerHostSwitchHandler
+
+// ServerHostSwitchHandler return a fasthttp.RequestHandler which select handler by request host
+func (h *ServerImp) ServerHostSwitchHandler(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		log.Printf("ServerHostSwitchHandler(%s <= %s), requested path is %q(%q). LastURI is %q. Counter is %d", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.Path(), ctx.Request.URI().String(), h.LastURI, h.Counter)
+
+		h.mux.Lock()
+		h.LastURI = string(ctx.Path())
+		h.Counter++
+		h.mux.Unlock()
+
+		reqHost := ctx.Host()
+
+		var aclhost string
+		var err error
+		aclhost, _, err = net.SplitHostPort(string(reqHost))
+
+		if err != nil {
+			// not port come with request host
+			aclhost = string(reqHost)
+		}
+		if handler := h.MatchHostHandler(string(aclhost)); handler != nil {
+			log.Printf("ServerHostSwitchHandler, (%s <= %s), host switching for host: %s\n", ctx.LocalAddr(), ctx.RemoteAddr(), aclhost)
+			handler(ctx)
+			return
+		}
+		if next != nil {
+			next(ctx)
+		}
+		return
+	}
 }
 
 // DomainACL do ACL on access host
@@ -41,27 +151,29 @@ func (h *ServerImp) DomainACL(name string) error {
 		return nil
 	}
 
-	isIP := IsAllDotNumber(name)
-
 	// Todo: more effection way to check for massive domains
+	// Todo: use map[host]bool to storage single host list
 	for _, oneDomain := range h.Domains {
 		if name == oneDomain {
 			log.Printf("DomainACL, match normal domain: %s\n", name)
 			return nil
 		}
-		if isIP && oneDomain == "0.0.0.0" {
-			log.Printf("DomainACL, match IP(wildcard): %s\n", name)
-			return nil
-		}
-		log.Printf("DomainACL, MISMATCH normal domain (%s): %s\n", oneDomain, name)
+
+		// log.Printf("DomainACL, MISMATCH normal domain (%s): %s\n", oneDomain, name)
 	}
+
+	isIP := IsAllDotNumber(name)
 
 	for _, oneDomain := range h.WildcardDomains {
 		if strings.HasSuffix(name, oneDomain) {
 			log.Printf("DomainACL, match WILDCARD domain (*%s): %s\n", oneDomain, name)
 			return nil
 		}
-		log.Printf("DomainACL, MISMATCH WILDCARD domain (*%s): %s\n", oneDomain, name)
+		if isIP && oneDomain == "0.0.0.0" {
+			log.Printf("DomainACL, match WILDCARD IP: %s\n", name)
+			return nil
+		}
+		// log.Printf("DomainACL, MISMATCH WILDCARD domain (*%s): %s\n", oneDomain, name)
 	}
 	log.Printf("DomainACL, not allowed domain: %s\n", name)
 	return fmt.Errorf("not allowed domain %s", name)
@@ -120,7 +232,7 @@ func (h *ServerImp) HTTPChallengeHandler(am *certmagic.ACMEManager, next http.Ha
 			if len(scheme) == 0 {
 				scheme = "http"
 			}
-			msg := fmt.Sprintf("httpChallengeLogger: unhandled ACME HTTP Challenge request, remote address %s, URL %s\n", req.RemoteAddr, scheme+"://"+req.Host+req.URL.String())
+			msg := fmt.Sprintf("httpChallengeLogger: unhandled ACME HTTP Challenge request, local address %s, remote address %s, URL %s\n", req.Header.Get("x-fasthttp-localaddr"), req.RemoteAddr, scheme+"://"+req.Host+req.URL.String())
 			fmt.Fprintf(w, msg)
 			log.Printf(msg)
 
@@ -235,15 +347,22 @@ func (h *ServerImp) MagicServerImp(redirect, next fasthttp.RequestHandler) fasth
 
 // ServerControlHandler process shutdown command from remote
 func (h *ServerImp) ServerControlHandler(ctx *fasthttp.RequestCtx) {
-	tokenOk := bytes.Compare(h.CtlToken, []byte(fmt.Sprintf("%v", ctx.UserValue("token"))))
-	log.Printf("serverControlHandler: token %s == %s = %v, (%s <= %s), requested path is %q(%q). LastURI is %q. Counter is %d", h.CtlToken, ctx.UserValue("token"), tokenOk, ctx.LocalAddr(), ctx.RemoteAddr(), ctx.Path(), ctx.Request.URI().String(), h.LastURI, h.Counter)
-	if len(h.CtlToken) > 0 && tokenOk == 0 {
+	tokenOk := bytes.Compare(h.CtrlToken, []byte(fmt.Sprintf("%v", ctx.UserValue("token"))))
+	log.Printf("serverControlHandler: token %s == %s = %v, (%s <= %s), requested path is %q(%q). LastURI is %q. Counter is %d", h.CtrlToken, ctx.UserValue("token"), tokenOk, ctx.LocalAddr(), ctx.RemoteAddr(), ctx.Path(), ctx.Request.URI().String(), h.LastURI, h.Counter)
+	if len(h.CtrlToken) > 0 && tokenOk == 0 {
 		log.Printf("serverControlHandler: shutting down server ...\n")
 		fmt.Fprintf(ctx, "serverControlHandler: shutting down server ...\n")
-		time.Sleep(time.Second)
-		syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		ctx.SetStatusCode(fasthttp.StatusOK)
+
+		//
+		go func() {
+			time.Sleep(time.Millisecond * 100)
+			syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		}()
+
 	} else {
-		log.Printf("serverControlHandler: happy running ...\n")
-		fmt.Fprintf(ctx, "serverControlHandler: happy running ...\n")
+		log.Printf("serverControlHandler: access denied\n")
+		fmt.Fprintf(ctx, "serverControlHandler: access denied\n")
+		ctx.SetStatusCode(fasthttp.StatusForbidden)
 	}
 }

@@ -2,7 +2,11 @@
 
 package magicgate
 
-import "strings"
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"strings"
+)
 
 // LoopReplaceAll repeatedly replace until nothing changed
 func LoopReplaceAll(s, old, new string) string {
@@ -25,4 +29,14 @@ func IsAllDotNumber(s string) bool {
 		}
 	}
 	return true
+}
+
+// RandToken generates a random hex value.
+// thanks: https://christiangiacomi.com/posts/random-hex-go/
+func RandToken(n int) (string, error) {
+	bytes := make([]byte, n)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
 }
