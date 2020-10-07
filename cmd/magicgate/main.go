@@ -20,6 +20,7 @@ import (
 	"github.com/caddyserver/certmagic"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/expvarhandler"
+	"github.com/wheelcomplex/fastcache"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/acme"
 )
@@ -36,6 +37,7 @@ var (
 	docRoot            = flag.String("docroot", "/var/www", "Directory to serve static files from")
 	generateIndexPages = flag.Bool("generateIndexPages", true, "Whether to generate directory index pages")
 	certDir            = flag.String("certdir", "./.magicgate/cert/", "Path to cache cert")
+	cacheDir           = flag.String("cachedir", "./.magicgate/fastcache\\/", "Path to fastcache")
 	vhost              = flag.Bool("vhost", false, "Enables virtual hosting by prepending the requested path with the requested hostname")
 	certDomains        = flag.String("domains", "", "Domain list for ssl cert, empty or * for all domains, *.example.com for wildcard sub-domains")
 	defaultServerName  = flag.String("defaultservername", "", "Default server name for ssl cert when not servername supply from client")
@@ -190,6 +192,30 @@ func main() {
 	}
 	fsHandler := fs.NewRequestHandler()
 
+	//
+	if err := os.MkdirAll(*certDir, 0700); err != nil {
+		log.Fatalf("error in create cert dir: %s", err)
+	}
+	if err := os.MkdirAll(*cacheDir, 0700); err != nil {
+		log.Fatalf("error in create fastcache dir: %s", err)
+	}
+
+	// load fastcache
+	var myCache *fastcache.Cache
+	if myCache, err = fastcache.LoadFromFile(*cacheDir); err != nil {
+		log.Printf("try to create new cache while error in load fastcache dir: %s", err)
+		myCache = fastcache.New(2 * 1024 * 1024)
+		if err := myCache.SaveToFile(*cacheDir); err != nil {
+			log.Fatalf("error in save fastcache dir: %s", err)
+		}
+		log.Printf("new cache created: %s", *cacheDir)
+	}
+
+	myCache.VisitAllEntries(func(k, v []byte) error {
+		log.Printf("VisitAllEntries callback: key %q, value %q", k, v)
+		return nil
+	})
+
 	// put custom in DefaultACME
 	certmagic.DefaultACME.Email = *certEmail
 
@@ -213,9 +239,9 @@ func main() {
 
 	certmagic.Default.Storage = &certmagic.FileStorage{Path: *certDir}
 
-	certmagic.Default.OnEvent = func(event string, data interface{}) {
-		log.Printf("certmagic.Default.OnEvent: %s, %v\n", event, data)
-	}
+	// certmagic.Default.OnEvent = func(event string, data interface{}) {
+	// 	// log.Printf("certmagic.Default.OnEvent: %s, %v\n", event, data)
+	// }
 
 	// get my certmagic.Config from default
 	myConfig := certmagic.NewDefault()
@@ -230,6 +256,16 @@ func main() {
 	} else {
 		log.Printf("certmagic running on LetsEncryptStagingCA\n")
 	}
+
+	// TLS specific general settings
+	tlsCfg := &tls.Config{
+		MinVersion:     tls.VersionTLS12,
+		GetCertificate: myConfig.GetCertificate,
+		NextProtos: []string{
+			"http/1.1", acme.ALPNProto,
+		},
+	}
+	// get tlsCfg for tls finally
 
 	// http routing
 	// handler ACME or redirect to tls
@@ -279,7 +315,7 @@ func main() {
 		log.Printf("Starting Alternate HTTP server on %q", *addrAlt)
 
 		go func() {
-			if err := fasthttp.ListenAndServe(*addrAlt, tlsServiceHandler); err != nil {
+			if err := fasthttp.ListenAndServe(*addrAlt, tlsRouterHandler); err != nil {
 				log.Fatalf("error in ListenAndServe: %s", err)
 			}
 		}()
@@ -289,27 +325,14 @@ func main() {
 	if len(*addrTLS) > 0 {
 		log.Printf("Starting HTTPS server on %q", *addrTLS)
 
-		if err := os.MkdirAll(*certDir, 0700); err != nil {
-			log.Fatalf("error in create cert dir: %s", err)
-		}
-
-		// TLS specific general settings
-		cfg := &tls.Config{
-			MinVersion:     tls.VersionTLS12,
-			GetCertificate: myConfig.GetCertificate,
-			NextProtos: []string{
-				"http/1.1", acme.ALPNProto,
-			},
-		}
-		// get cfg for tls finally
-
 		// Let's Encrypt tls-alpn-01 only works on port 443.
 		ln, err := net.Listen("tcp4", *addrTLS)
 		if err != nil {
 			panic(err)
 		}
 
-		lnTLS := tls.NewListener(ln, cfg)
+		// apply tlsCfg for tls.NewListener finally
+		lnTLS := tls.NewListener(ln, tlsCfg)
 		go func() {
 			if err := fasthttp.Serve(lnTLS, tlsRouterHandler); err != nil {
 				panic(err)

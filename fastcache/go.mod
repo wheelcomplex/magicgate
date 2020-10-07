@@ -1,4 +1,4 @@
-module github.com/wheelcomplex/magicgate/fastcache
+module github.com/wheelcomplex/fastcache
 
 go 1.16
 
