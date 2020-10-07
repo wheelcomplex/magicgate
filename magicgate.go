@@ -224,23 +224,23 @@ func (h *ServerImp) ServerHandler(next fasthttp.RequestHandler) fasthttp.Request
 // HTTPChallengeHandler return a fasthttp.RequestHandler which use for handle ACME HTTP challenge,
 // only requests to "/.well-known/acme-challenge/" should be route to this handler.
 func (h *ServerImp) HTTPChallengeHandler(am *certmagic.ACMEManager, next http.HandlerFunc) fasthttp.RequestHandler {
-	mux := http.NewServeMux()
-	if next == nil {
-		// use default handler
-		next = func(w http.ResponseWriter, req *http.Request) {
-			scheme := req.Header.Get("x-fasthttp-scheme")
-			if len(scheme) == 0 {
-				scheme = "http"
-			}
-			msg := fmt.Sprintf("httpChallengeLogger: unhandled ACME HTTP Challenge request, local address %s, remote address %s, URL %s\n", req.Header.Get("x-fasthttp-localaddr"), req.RemoteAddr, scheme+"://"+req.Host+req.URL.String())
-			fmt.Fprintf(w, msg)
-			log.Printf(msg)
 
-			w.WriteHeader(http.StatusBadRequest)
+	next = func(w http.ResponseWriter, r *http.Request) {
+		if am.HandleHTTPChallenge(w, r) {
+			return
 		}
+		scheme := r.Header.Get("x-fasthttp-scheme")
+		if len(scheme) == 0 {
+			scheme = "http"
+		}
+		msg := fmt.Sprintf("httpChallengeLogger: unhandled ACME HTTP Challenge request, local address %s, remote address %s, URL %s\n", r.Header.Get("x-fasthttp-localaddr"), r.RemoteAddr, scheme+"://"+r.Host+r.URL.String())
+		fmt.Fprintf(w, msg)
+		log.Printf(msg)
+
+		w.WriteHeader(http.StatusBadRequest)
 	}
-	mux.HandleFunc("/", next)
-	httpChallengeHandler := fasthttpadaptor.NewFastHTTPHandler(am.HTTPChallengeHandler(mux))
+	httpChallengeHandler := fasthttpadaptor.NewFastHTTPHandlerFunc(next)
+
 	return func(ctx *fasthttp.RequestCtx) {
 		log.Printf("HTTPChallengeHandler: (%s <= %s), token: %s, URL %q(%q). LastURI is %q. Counter is %d", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.UserValue("token"), ctx.Path(), ctx.Request.URI().String(), h.LastURI, h.Counter)
 
