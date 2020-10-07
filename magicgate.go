@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"syscall"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/caddyserver/certmagic"
 	"github.com/valyala/fasthttp"
-	"github.com/valyala/fasthttp/fasthttpadaptor"
 )
 
 // HostStat record stat of a backend host
@@ -221,28 +219,11 @@ func (h *ServerImp) ServerHandler(next fasthttp.RequestHandler) fasthttp.Request
 	}
 }
 
-// HTTPChallengeHandler return a fasthttp.RequestHandler which use for handle ACME HTTP challenge,
+// FastHTTPChallengeHandler return a fasthttp.RequestHandler which use for handle ACME HTTP challenge,
 // only requests to "/.well-known/acme-challenge/" should be route to this handler.
-func (h *ServerImp) HTTPChallengeHandler(am *certmagic.ACMEManager, next http.HandlerFunc) fasthttp.RequestHandler {
-
-	next = func(w http.ResponseWriter, r *http.Request) {
-		if am.HandleHTTPChallenge(w, r) {
-			return
-		}
-		scheme := r.Header.Get("x-fasthttp-scheme")
-		if len(scheme) == 0 {
-			scheme = "http"
-		}
-		msg := fmt.Sprintf("httpChallengeLogger: unhandled ACME HTTP Challenge request, local address %s, remote address %s, URL %s\n", r.Header.Get("x-fasthttp-localaddr"), r.RemoteAddr, scheme+"://"+r.Host+r.URL.String())
-		fmt.Fprintf(w, msg)
-		log.Printf(msg)
-
-		w.WriteHeader(http.StatusBadRequest)
-	}
-	httpChallengeHandler := fasthttpadaptor.NewFastHTTPHandlerFunc(next)
-
+func (h *ServerImp) FastHTTPChallengeHandler(am *certmagic.ACMEManager, next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
-		log.Printf("HTTPChallengeHandler: (%s <= %s), token: %s, URL %q(%q). LastURI is %q. Counter is %d", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.UserValue("token"), ctx.Path(), ctx.Request.URI().String(), h.LastURI, h.Counter)
+		log.Printf("FastHTTPChallengeHandler: (%s <= %s), token: %s, URL %q(%q). LastURI is %q. Counter is %d", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.UserValue("token"), ctx.Path(), ctx.Request.URI().String(), h.LastURI, h.Counter)
 
 		h.mux.Lock()
 
@@ -250,7 +231,22 @@ func (h *ServerImp) HTTPChallengeHandler(am *certmagic.ACMEManager, next http.Ha
 		h.Counter++
 		h.mux.Unlock()
 
-		httpChallengeHandler(ctx)
+		if am.HandleFastHTTPChallenge(ctx) {
+			log.Printf("FastHTTPChallengeHandler: Challenge OK, (%s <= %s), token: %s, URL %q(%q). LastURI is %q. Counter is %d", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.UserValue("token"), ctx.Path(), ctx.Request.URI().String(), h.LastURI, h.Counter)
+			return
+		}
+		if next != nil {
+			next(ctx)
+		} else {
+			msg := fmt.Sprintf("FastHTTPChallengeHandler: Challenge SKIPPED, (%s <= %s), token: %s, URL %q(%q). LastURI is %q. Counter is %d", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.UserValue("token"), ctx.Path(), ctx.Request.URI().String(), h.LastURI, h.Counter)
+			if _, err := ctx.WriteString(msg); err != nil {
+				log.Printf(msg + ", write to client failed: " + fmt.Sprintf("%v", err) + "\n")
+				ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+			} else {
+				log.Printf(msg + ", invalid http challenge\n")
+				ctx.SetStatusCode(fasthttp.StatusBadRequest)
+			}
+		}
 	}
 }
 

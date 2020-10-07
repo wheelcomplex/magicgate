@@ -190,23 +190,26 @@ func main() {
 	}
 	fsHandler := fs.NewRequestHandler()
 
-	// setup in DefaultACME
+	// put custom in DefaultACME
 	certmagic.DefaultACME.Email = *certEmail
 
 	certmagic.DefaultACME.Agreed = true
 
 	certmagic.DefaultACME.Logger = logger
 
+	// default to stage server
 	certmagic.DefaultACME.CA = certmagic.LetsEncryptStagingCA
+
+	// put custom setting to default Config
+	certmagic.Default.DefaultServerName = *defaultServerName
+
+	certmagic.Default.Logger = logger
 
 	// if the decision function returns an error, a certificate
 	// may not be obtained for that name at that time
 	certmagic.Default.OnDemand = &certmagic.OnDemandConfig{
 		DecisionFunc: srv.DomainACLNoIP,
 	}
-
-	certmagic.Default.DefaultServerName = *defaultServerName
-	certmagic.Default.Logger = logger
 
 	certmagic.Default.Storage = &certmagic.FileStorage{Path: *certDir}
 
@@ -217,24 +220,9 @@ func main() {
 	// get my certmagic.Config from default
 	myConfig := certmagic.NewDefault()
 
-	myConfig.DefaultServerName = *defaultServerName
-
-	// certmagic.DefaultACME
-	// myACMEManager := certmagic.NewACMEManager(myConfig, certmagic.ACMEManager{
-	// 	CA:     certmagic.LetsEncryptStagingCA,
-	// 	Email:  *certEmail,
-	// 	Agreed: true,
-	// 	Logger: logger,
-	// 	// plus any other customizations you need
-	// })
-
 	myACMEManager := certmagic.NewACMEManager(myConfig, certmagic.DefaultACME)
 
 	myConfig.Issuer = myACMEManager
-
-	log.Printf("myACMEManager: \n%V\n", myACMEManager)
-
-	log.Printf("myConfig: \n%V\n", myConfig)
 
 	if *runProd {
 		log.Printf("certmagic running on LetsEncryptProductionCA\n")
@@ -248,7 +236,7 @@ func main() {
 	httpRouter := fasthttprouter.New()
 	httpRouter.GET("/stats", expvarhandler.ExpvarHandler)
 	httpRouter.GET("/stat", expvarhandler.ExpvarHandler)
-	httpRouter.GET("/.well-known/acme-challenge/*token", srv.HTTPChallengeHandler(myACMEManager, nil))
+	httpRouter.GET("/.well-known/acme-challenge/*token", srv.FastHTTPChallengeHandler(myACMEManager, nil))
 	// catch-all to redirect
 	httpRouter.NotFound = srv.RedirectToTLSHandler()
 	// or trim prefix and redirect to tls

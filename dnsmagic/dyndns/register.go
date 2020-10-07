@@ -48,6 +48,7 @@ func (h *RegisterServerImp) getClientNameByToken(ctx *fasthttp.RequestCtx) (toke
 }
 
 // Todo: check server ctrl token first
+// Todo: use fastcache
 
 // RegisterHandler return a fasthttp.RequestHandler which register client ip/domain to server
 func (h *RegisterServerImp) RegisterHandler() fasthttp.RequestHandler {
