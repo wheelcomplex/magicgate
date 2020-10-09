@@ -1,6 +1,6 @@
-// a fasthttp serverImp to register client ip/domain to server
+//
 
-package dyndns
+package magicgate
 
 import (
 	"bytes"
@@ -13,16 +13,16 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// RegisterServerImp register client ip/domain to server
-type RegisterServerImp struct {
-	Tokens   map[string]string // [token]client-name
-	Contents map[string]string // [token]client-register-content
-	mux      sync.Mutex
+// DataCache implements internal data/cache management
+type DataCache struct {
+	tokens map[string]uint64                 // [token]uid
+	userDB map[uint64]map[string]interface{} // [uid]map[class]user data interface
+	mux    sync.Mutex
 }
 
-// NewRegisterServerImp return a RegisterServerImp with input token list
-func NewRegisterServerImp(tokens map[string]string) *RegisterServerImp {
-	h := &RegisterServerImp{
+// NewDataCache return a DataCache with input token list
+func NewDataCache(tokens map[string]string) *DataCache {
+	h := &DataCache{
 		Tokens:   tokens,
 		Contents: make(map[string]string),
 	}
@@ -32,8 +32,8 @@ func NewRegisterServerImp(tokens map[string]string) *RegisterServerImp {
 	return h
 }
 
-// RegisterHandler return a fasthttp.RequestHandler which register client ip/domain to server
-func (h *RegisterServerImp) getClientNameByToken(ctx *fasthttp.RequestCtx) (token string, name string, ok bool) {
+// DataCacheHandler return a fasthttp.RequestHandler which register client ip/domain to server
+func (h *DataCache) getClientNameByToken(ctx *fasthttp.RequestCtx) (token string, name string, ok bool) {
 
 	token = string([]byte(fmt.Sprintf("%v", ctx.UserValue("token"))))
 
@@ -50,17 +50,17 @@ func (h *RegisterServerImp) getClientNameByToken(ctx *fasthttp.RequestCtx) (toke
 // Todo: check server ctrl token first
 // Todo: use fastcache
 
-// RegisterHandler return a fasthttp.RequestHandler which register client ip/domain to server
-func (h *RegisterServerImp) RegisterHandler() fasthttp.RequestHandler {
+// DataCacheHandler return a fasthttp.RequestHandler which register client ip/domain to server
+func (h *DataCache) DataCacheHandler() fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
-		log.Printf("RegisterHandler(%s <= %s), requested path is %q(%q).", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.Path(), ctx.Request.URI().String())
+		log.Printf("DataCacheHandler(%s <= %s), requested path is %q(%q).", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.Path(), ctx.Request.URI().String())
 
 		h.mux.Lock()
 		defer h.mux.Unlock()
 
 		tk, name, ok := h.getClientNameByToken(ctx)
 
-		msg := fmt.Sprintf("RegisterHandler: token %s, name %s, ok %v, (%s <= %s), requested path is %q(%q)", tk, name, ok, ctx.LocalAddr(), ctx.RemoteAddr(), ctx.Path(), ctx.Request.URI().String())
+		msg := fmt.Sprintf("DataCacheHandler: token %s, name %s, ok %v, (%s <= %s), requested path is %q(%q)", tk, name, ok, ctx.LocalAddr(), ctx.RemoteAddr(), ctx.Path(), ctx.Request.URI().String())
 		if ok {
 
 			value := []byte(fmt.Sprintf("%v", ctx.UserValue("value")))
@@ -99,7 +99,7 @@ func (h *RegisterServerImp) RegisterHandler() fasthttp.RequestHandler {
 }
 
 // JSONContentHandler return a fasthttp.RequestHandler which show current contents to client in JSON
-func (h *RegisterServerImp) JSONContentHandler() fasthttp.RequestHandler {
+func (h *DataCache) JSONContentHandler() fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
 		log.Printf("JSONContentHandler(%s <= %s), requested path is %q(%q).", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.Path(), ctx.Request.URI().String())
 
