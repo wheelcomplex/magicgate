@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wheelcomplex/lumberjack"
 	"github.com/wheelcomplex/magicgate/utils"
 )
 
@@ -81,13 +82,19 @@ type ProxyConfig struct {
 	KeepaliveTimeout  time.Duration
 	SynTimeout        time.Duration
 	Coolingtimeout    time.Duration
+
+	LogWriter   *lumberjack.Logger
+	AuthHandler ProxyAuthHandler
 }
 
 // NewListConfig return a *ProxyConfig with initial settings,
 // list should has format: <protocol>/<front address>/backend addr,...+another frontend,
 // word "passive" as backend means backend connection initial from peer,
 // example: tcp/0.0.0.0:80/10.0.0.2:8080,10.0.0.3:9080+udp/0.0.0.0:53/10.0.0.2:5353,passive
-func NewListConfig(list string) *ProxyConfig {
+func NewListConfig(list string, authHandler ProxyAuthHandler, logWriter *lumberjack.Logger) *ProxyConfig {
+	if logWriter != nil {
+		log.SetOutput(logWriter)
+	}
 	//
 	forwards := make(map[string]string)
 
@@ -123,12 +130,17 @@ func NewListConfig(list string) *ProxyConfig {
 		forwards[proto+"/"+front] = back
 	}
 
-	return NewForwardConfig(forwards)
+	return NewForwardConfig(forwards, authHandler, logWriter)
 }
 
 // NewForwardConfig return a *ProxyConfig with initial settings
-func NewForwardConfig(forwards map[string]string) *ProxyConfig {
+func NewForwardConfig(forwards map[string]string, authHandler ProxyAuthHandler, logWriter *lumberjack.Logger) *ProxyConfig {
 	cfg := NewDefaultConfig()
+	cfg.LogWriter = logWriter
+	cfg.AuthHandler = authHandler
+	if logWriter != nil {
+		log.SetOutput(logWriter)
+	}
 	// copy
 	for k := range forwards {
 		cfg.Forwards[k] = forwards[k]
@@ -140,10 +152,12 @@ func NewForwardConfig(forwards map[string]string) *ProxyConfig {
 func NewDefaultConfig() *ProxyConfig {
 	cfg := &ProxyConfig{
 		KeepaliveInterval: 30 * time.Second,
-		KeepaliveTimeout:  30 * time.Second,
-		SynTimeout:        500 * time.Millisecond,
+		KeepaliveTimeout:  1 * time.Second,
+		SynTimeout:        800 * time.Millisecond,
 		Coolingtimeout:    5 * time.Second,
 		Forwards:          make(map[string]string),
+		LogWriter:         nil,
+		AuthHandler:       nil,
 	}
 	return cfg
 }
@@ -153,9 +167,9 @@ func NewDefaultConfig() *ProxyConfig {
 // word "passive" as backend means backend connection initial from peer,
 // example: tcp/0.0.0.0:80/10.0.0.2:8080,10.0.0.3:9080,
 // example2: udp/0.0.0.0:53/10.0.0.2:5353,passive,
-func NewProxyServer(list string, auth ProxyAuthHandler) *ProxyServer {
+func NewProxyServer(list string, auth ProxyAuthHandler, logWriter *lumberjack.Logger) *ProxyServer {
 
-	return NewProxyServerByConf(NewListConfig(list), auth)
+	return NewProxyServerByConf(NewListConfig(list, auth, logWriter))
 
 }
 
@@ -200,12 +214,12 @@ type ProxyServer struct {
 }
 
 // NewProxyServerByConf return a ProxyServer base on input proxy list
-func NewProxyServerByConf(cfg *ProxyConfig, authHandler ProxyAuthHandler) *ProxyServer {
+func NewProxyServerByConf(cfg *ProxyConfig) *ProxyServer {
 	ps := &ProxyServer{
 		proxyMap:    make(map[string]*forwardEntry),
 		sessions:    make(map[uint64]*ProxyCtx),
 		cfg:         cfg,
-		authHandler: authHandler,
+		authHandler: cfg.AuthHandler,
 	}
 
 	if cfg == nil {
@@ -224,7 +238,7 @@ func NewProxyServerByConf(cfg *ProxyConfig, authHandler ProxyAuthHandler) *Proxy
 
 // AddForward create new forward tunnel and process income connections
 func (ps *ProxyServer) AddForward(list string) error {
-	cfg := NewListConfig(list)
+	cfg := NewListConfig(list, nil, nil)
 	return ps.AddForwardMap(cfg.Forwards)
 }
 
@@ -300,7 +314,7 @@ func (ps *ProxyServer) AddForwardMap(forward map[string]string) error {
 
 // DelForward delete forward tunnel
 func (ps *ProxyServer) DelForward(list string) error {
-	cfg := NewListConfig(list)
+	cfg := NewListConfig(list, nil, nil)
 	return ps.DelForwardMap(cfg.Forwards)
 }
 
@@ -440,19 +454,24 @@ func (ps *ProxyServer) tcpBackend(proxyKey string, frontConn *net.TCPConn) {
 			backErrChan <- err
 		}(backConn, frontConn)
 
+		// exit until both connections closed
 		select {
 		case err = <-frontErrChan:
-			log.Printf("frontend connection error: %s/%s -> %s, %s, closing ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr(), err)
+			log.Printf("frontend connection error: %s/%s -> %s, %s, closing backend ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr(), err)
 			time.Sleep(2 * ps.cfg.SynTimeout)
 			frontConn.Close()
 			backConn.Close()
 			exitLoop = true
+			err = <-backErrChan
+			log.Printf("backend connection error: %s/%s -> %s, %s, closing ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), err)
 		case err = <-backErrChan:
-			log.Printf("backend connection error: %s/%s -> %s, %s, retry ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), err)
+			log.Printf("backend connection error: %s/%s -> %s, %s, closing frontend ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), err)
 			time.Sleep(2 * ps.cfg.SynTimeout)
 			backConn.Close()
 			frontConn.Close()
 			exitLoop = true
+			err = <-frontErrChan
+			log.Printf("frontend connection error: %s/%s -> %s, %s, closing ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr(), err)
 		}
 	}
 }
@@ -546,6 +565,10 @@ func (ps *ProxyServer) udpBackend(proxyKey string, frontConn *net.UDPConn) {
 func (ps *ProxyServer) StartProxy() {
 
 	var err error
+
+	if ps.cfg.LogWriter != nil {
+		log.SetOutput(ps.cfg.LogWriter)
+	}
 
 	// launch listener
 	for proxyKey, entry := range ps.proxyMap {

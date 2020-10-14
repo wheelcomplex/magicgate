@@ -30,6 +30,8 @@ replace github.com/wheelcomplex/rawproxy => /home/david/home/wheelcomplex/magicg
 
 replace github.com/wheelcomplex/utils => /home/david/home/wheelcomplex/magicgate/utils
 
+replace github.com/wheelcomplex/lumberjack => /home/david/home/wheelcomplex/magicgate/lumberjack
+
 require (
 	github.com/buaazp/fasthttprouter v0.1.1
 	github.com/caddyserver/certmagic v0.12.0
@@ -37,6 +39,7 @@ require (
 	github.com/miekg/dns v1.1.32 // indirect
 	github.com/valyala/fasthttp v1.16.0
 	github.com/wheelcomplex/fastcache v1.5.7
+	github.com/wheelcomplex/lumberjack v0.0.0-00010101000000-000000000000
 	github.com/wheelcomplex/rawproxy v0.0.0-00010101000000-000000000000
 	go.uber.org/zap v1.16.0
 	golang.org/x/crypto v0.0.0-20201002170205-7f63de1d35b0

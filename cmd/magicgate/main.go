@@ -15,11 +15,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/buaazp/fasthttprouter"
 	"github.com/caddyserver/certmagic"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/expvarhandler"
+	"github.com/wheelcomplex/lumberjack"
 	"github.com/wheelcomplex/magicgate"
 	"github.com/wheelcomplex/magicgate/utils"
 	"github.com/wheelcomplex/rawproxy"
@@ -33,7 +35,7 @@ var (
 	trimList           = flag.String("trimlist", "", "redirect www.example.com or blog.example.com to example.com, when --trimlist=www,blog")
 	runProd            = flag.Bool("prod", false, "run on production environment")
 	addr               = flag.String("addr", "0.0.0.0:80", "TCP address to listen for HTTP")
-	addrAlt            = flag.String("addralt", "0.0.0.0:9080", "alternate TCP address to listen for HTTP, as backend for reverse proxy")
+	addrAlt            = flag.String("addrAlt", "0.0.0.0:9080", "alternate TCP address to listen for HTTP, as backend for reverse proxy")
 	addrTLS            = flag.String("addrTLS", "0.0.0.0:443", "TCP address to listen to TLS (aka SSL or HTTPS) requests. Leave empty for disabling TLS")
 	byteRange          = flag.Bool("byteRange", true, "Enables byte range requests if set to true")
 	compress           = flag.Bool("compress", true, "Enables transparent response compression if set to true")
@@ -41,6 +43,7 @@ var (
 	generateIndexPages = flag.Bool("generateIndexPages", true, "Whether to generate directory index pages")
 	certDir            = flag.String("certdir", "./.magicgate/cert/", "Path to cache cert")
 	cacheDir           = flag.String("cachedir", "./.magicgate/fastcache/", "Path to fastcache")
+	logDir             = flag.String("logdir", "./log/", "Path to save log")
 	vhost              = flag.Bool("vhost", false, "Enables virtual hosting by prepending the requested path with the requested hostname")
 	certDomains        = flag.String("domains", "", "Domain list for ssl cert, empty or * for all domains, *.example.com for wildcard sub-domains")
 	defaultServerName  = flag.String("defaultservername", "", "Default server name for ssl cert when not servername supply from client")
@@ -50,11 +53,45 @@ var (
 
 func main() {
 
-	logger := zap.NewExample()
-	defer logger.Sync()
-
 	// Parse command-line flags.
 	flag.Parse()
+
+	log.Printf("Magicgate v1.0\n")
+	log.Printf("%s\n", time.Now().Format("2006-01-02 15:04:05.000000"))
+	//
+	*certDir, _ = filepath.Abs(*certDir)
+	log.Printf("CertDir: %s\n", *certDir)
+	if err := os.MkdirAll(*certDir, 0700); err != nil {
+		log.Fatalf("error in create cert dir: %s", err)
+	}
+	*cacheDir, _ = filepath.Abs(*cacheDir)
+	log.Printf("CacheDir: %s\n", *cacheDir)
+	if err := os.MkdirAll(*cacheDir, 0700); err != nil {
+		log.Fatalf("error in create fastcache dir: %s", err)
+	}
+
+	*logDir, _ = filepath.Abs(*logDir)
+	log.Printf("LogDir: %s\n", *logDir)
+	if err := os.MkdirAll(*logDir, 0700); err != nil {
+		log.Fatalf("error in create log dir: %s", err)
+	}
+
+	logWriter := &lumberjack.Logger{
+		Filename:   *logDir + "/main.log",
+		MaxSize:    500, // megabytes
+		MaxBackups: 3,
+		MaxAge:     28,    //days
+		Compress:   false, // disabled by default
+	}
+
+	log.Printf("logging to file: %s\n", logWriter.Filename)
+	log.SetOutput(logWriter)
+
+	log.Printf("Magicgate v1.0\n")
+	log.Printf("%s\n", time.Now().Format("2006-01-02 15:04:05.000000"))
+
+	logger := zap.NewExample()
+	defer logger.Sync()
 
 	var (
 		certDomainList         = []string{}
@@ -143,18 +180,6 @@ func main() {
 	}
 	fsHandler := fs.NewRequestHandler()
 
-	//
-	*certDir, _ = filepath.Abs(*certDir)
-	log.Printf("CertDir: %s\n", *certDir)
-	if err := os.MkdirAll(*certDir, 0700); err != nil {
-		log.Fatalf("error in create cert dir: %s", err)
-	}
-	*cacheDir, _ = filepath.Abs(*cacheDir)
-	log.Printf("CacheDir: %s\n", *cacheDir)
-	if err := os.MkdirAll(*cacheDir, 0700); err != nil {
-		log.Fatalf("error in create fastcache dir: %s", err)
-	}
-
 	tokens := map[string]uint64{}
 
 	if len(*ctrlToken) == 0 {
@@ -227,7 +252,7 @@ func main() {
 
 	proxyAuth := dc.ProxyAuthHandler()
 
-	myProxy := rawproxy.NewProxyServer(*proxyList, proxyAuth)
+	myProxy := rawproxy.NewProxyServer(*proxyList, proxyAuth, logWriter)
 
 	// merge tokens to dataCache
 	effected := dc.MergeTokens(tokens, true)
@@ -324,8 +349,6 @@ func main() {
 	utils.NoSIGHUP()
 	utils.NoSIGPIPE()
 
-	Todo: setup ljhk proxy
-
 	// start proxy server
 	if myProxy != nil {
 		log.Printf("Starting Proxy server ...\n")
@@ -376,8 +399,10 @@ func main() {
 		}()
 	}
 
-	log.Printf("Serving files from directory %q\n", *docRoot)
-	log.Printf("See stats at http://%s/stats\n", *addrAlt)
+	if len(*addrAlt) > 0 {
+		log.Printf("Serving files from directory %q\n", *docRoot)
+		log.Printf("See stats at http://%s/stats\n", *addrAlt)
+	}
 	// Wait forever.
 	select {}
 }
