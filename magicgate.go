@@ -14,6 +14,7 @@ import (
 
 	"github.com/caddyserver/certmagic"
 	"github.com/valyala/fasthttp"
+	"github.com/wheelcomplex/magicgate/utils"
 )
 
 // HostStat record stat of a backend host
@@ -92,7 +93,7 @@ func (h *ServerImp) MatchHostHandler(name string) fasthttp.RequestHandler {
 	}
 
 	// wildcard ip
-	if handler := h.NormalHostSwitch["0.0.0.0"]; handler != nil && IsAllDotNumber(name) {
+	if handler := h.NormalHostSwitch["0.0.0.0"]; handler != nil && utils.IsAllDotNumber(name) {
 		log.Printf("MatchHostHandler, match wildcard ip host: %s\n", name)
 		return handler
 	}
@@ -149,6 +150,8 @@ func (h *ServerImp) DomainACL(name string) error {
 		return nil
 	}
 
+	isIP := utils.IsAllDotNumber(name)
+
 	// Todo: more effection way to check for massive domains
 	// Todo: use map[host]bool to storage single host list
 	for _, oneDomain := range h.Domains {
@@ -156,19 +159,16 @@ func (h *ServerImp) DomainACL(name string) error {
 			// log.Printf("DomainACL, match normal domain: %s\n", name)
 			return nil
 		}
-
+		if isIP && oneDomain == "0.0.0.0" {
+			log.Printf("DomainACL, match WILDCARD IP(0.0.0.0): %s\n", name)
+			return nil
+		}
 		// log.Printf("DomainACL, MISMATCH normal domain (%s): %s\n", oneDomain, name)
 	}
-
-	isIP := IsAllDotNumber(name)
 
 	for _, oneDomain := range h.WildcardDomains {
 		if strings.HasSuffix(name, oneDomain) {
 			log.Printf("DomainACL, match WILDCARD domain (*%s): %s\n", oneDomain, name)
-			return nil
-		}
-		if isIP && oneDomain == "0.0.0.0" {
-			log.Printf("DomainACL, match WILDCARD IP: %s\n", name)
 			return nil
 		}
 		// log.Printf("DomainACL, MISMATCH WILDCARD domain (*%s): %s\n", oneDomain, name)
@@ -180,7 +180,7 @@ func (h *ServerImp) DomainACL(name string) error {
 // DomainACLNoIP do ACL on access host, IP not allowed
 func (h *ServerImp) DomainACLNoIP(name string) error {
 
-	if IsAllDotNumber(name) {
+	if utils.IsAllDotNumber(name) {
 		log.Printf("DomainACLNoIP, not allowed IP %s", name)
 		return fmt.Errorf("not allowed IP %s", name)
 	}
@@ -197,6 +197,10 @@ func (h *ServerImp) ServerHandler(next fasthttp.RequestHandler) fasthttp.Request
 		h.Counter++
 		h.mux.Unlock()
 
+		if h.purifyHandler(ctx) {
+			return
+		}
+
 		reqHost := ctx.Host()
 
 		var aclhost string
@@ -207,7 +211,7 @@ func (h *ServerImp) ServerHandler(next fasthttp.RequestHandler) fasthttp.Request
 			// not port come with request host
 			aclhost = string(reqHost)
 		}
-		if err := h.DomainACL(string(aclhost)); err != nil {
+		if err := h.DomainACL(aclhost); err != nil {
 			ctx.Response.SetStatusCode(fasthttp.StatusForbidden)
 			log.Printf("ServerHandler, (%s <= %s), access deny to host: %s\n", ctx.LocalAddr(), ctx.RemoteAddr(), aclhost)
 			return
@@ -250,6 +254,35 @@ func (h *ServerImp) FastHTTPChallengeHandler(am *certmagic.ACMEManager, next fas
 	}
 }
 
+// purifyHandler purify ctx,
+// return true when the request has been done.
+func (h *ServerImp) purifyHandler(ctx *fasthttp.RequestCtx) bool {
+
+	reqHost := ctx.Host()
+
+	var aclhost, aclport string
+	var err error
+	aclhost, aclport, err = net.SplitHostPort(string(reqHost))
+
+	if err != nil {
+		// not port come with request host
+		aclhost = string(reqHost)
+		aclport = ""
+	} else if aclport == "80" {
+		aclport = ""
+	} else {
+		aclport = ":" + aclport
+	}
+	if strings.Compare(aclhost, "0.0.0.0") == 0 {
+		// redirect to localhost
+		ctx.Redirect(string(ctx.URI().Scheme())+"://"+string("127.0.0.1")+aclport+string(ctx.RequestURI()), fasthttp.StatusFound)
+		ctx.SetUserValue("MagicRedirect", "0.0.0.0")
+		log.Printf("purifyHandler: host %s, (%s <= %s), redirected to %q\n", "0.0.0.0", ctx.LocalAddr(), ctx.RemoteAddr(), string(ctx.URI().Scheme())+"://"+string("127.0.0.1")+aclport+string(ctx.RequestURI()))
+		return true
+	}
+	return false
+}
+
 // PrefixRedirectHandler return a fasthttp.RequestHandler which trim the prefix from request host and redirect to new host,
 // if prefix not found, will pass request to next handler.
 func (h *ServerImp) PrefixRedirectHandler(next fasthttp.RequestHandler) fasthttp.RequestHandler {
@@ -262,6 +295,10 @@ func (h *ServerImp) PrefixRedirectHandler(next fasthttp.RequestHandler) fasthttp
 		h.LastURI = string(ctx.Path())
 		h.Counter++
 		h.mux.Unlock()
+
+		if h.purifyHandler(ctx) {
+			return
+		}
 
 		reqHost := ctx.Host()
 
@@ -298,6 +335,10 @@ func (h *ServerImp) RedirectToTLSHandler() fasthttp.RequestHandler {
 		h.LastURI = string(ctx.Path())
 		h.Counter++
 		h.mux.Unlock()
+
+		if h.purifyHandler(ctx) {
+			return
+		}
 
 		reqHost := ctx.Host()
 

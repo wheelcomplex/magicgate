@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -19,13 +20,15 @@ import (
 	"github.com/caddyserver/certmagic"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/expvarhandler"
-	"github.com/wheelcomplex/fastcache"
 	"github.com/wheelcomplex/magicgate"
+	"github.com/wheelcomplex/magicgate/utils"
+	"github.com/wheelcomplex/rawproxy"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/acme"
 )
 
 var (
+	proxyList          = flag.String("proxylist", "", "tcp/udp proxy, list format: <tcp|udp>:<frontend address>:<backend address|passive token>, address should be host:port, \npassive token use for backend connect to frontend")
 	ctrlToken          = flag.String("ctrltoken", "", "a token to control server from client, URI: /api/ctrl/shutdown/*token")
 	trimList           = flag.String("trimlist", "", "redirect www.example.com or blog.example.com to example.com, when --trimlist=www,blog")
 	runProd            = flag.Bool("prod", false, "run on production environment")
@@ -37,7 +40,7 @@ var (
 	docRoot            = flag.String("docroot", "/var/www", "Directory to serve static files from")
 	generateIndexPages = flag.Bool("generateIndexPages", true, "Whether to generate directory index pages")
 	certDir            = flag.String("certdir", "./.magicgate/cert/", "Path to cache cert")
-	cacheDir           = flag.String("cachedir", "./.magicgate/fastcache\\/", "Path to fastcache")
+	cacheDir           = flag.String("cachedir", "./.magicgate/fastcache/", "Path to fastcache")
 	vhost              = flag.Bool("vhost", false, "Enables virtual hosting by prepending the requested path with the requested hostname")
 	certDomains        = flag.String("domains", "", "Domain list for ssl cert, empty or * for all domains, *.example.com for wildcard sub-domains")
 	defaultServerName  = flag.String("defaultservername", "", "Default server name for ssl cert when not servername supply from client")
@@ -66,12 +69,12 @@ func main() {
 
 	// make default server name available
 	allDomains := *certDomains + "," + *defaultServerName
-	for _, item := range strings.Split(magicgate.LoopReplaceAll(allDomains, " ", ","), ",") {
+	for _, item := range strings.Split(utils.LoopReplaceAll(allDomains, " ", ","), ",") {
 		if len(item) == 0 {
 			continue
 		}
 		if strings.HasPrefix(item, "*.") {
-			item = magicgate.LoopReplaceAll(item, "*.", "")
+			item = utils.LoopReplaceAll(item, "*.", "")
 			if len(item) == 0 {
 				continue
 			}
@@ -90,12 +93,12 @@ func main() {
 	}
 
 	// trimList
-	for _, item := range strings.Split(magicgate.LoopReplaceAll(*trimList, " ", ","), ",") {
+	for _, item := range strings.Split(utils.LoopReplaceAll(*trimList, " ", ","), ",") {
 		if len(item) == 0 {
 			continue
 		}
 		if strings.HasSuffix(item, ".") {
-			item = magicgate.LoopReplaceAll(item, ".", "")
+			item = utils.LoopReplaceAll(item, ".", "")
 			if len(item) == 0 {
 				continue
 			}
@@ -141,35 +144,21 @@ func main() {
 	fsHandler := fs.NewRequestHandler()
 
 	//
+	*certDir, _ = filepath.Abs(*certDir)
+	log.Printf("CertDir: %s\n", *certDir)
 	if err := os.MkdirAll(*certDir, 0700); err != nil {
 		log.Fatalf("error in create cert dir: %s", err)
 	}
+	*cacheDir, _ = filepath.Abs(*cacheDir)
+	log.Printf("CacheDir: %s\n", *cacheDir)
 	if err := os.MkdirAll(*cacheDir, 0700); err != nil {
 		log.Fatalf("error in create fastcache dir: %s", err)
 	}
 
-	// load fastcache
-	var myCache *fastcache.Cache
-	if myCache, err = fastcache.LoadFromFile(*cacheDir); err != nil {
-		log.Printf("try to create new cache while error in load fastcache dir: %s", err)
-		myCache = fastcache.New(2 * 1024 * 1024)
-		if err := myCache.SaveToFile(*cacheDir); err != nil {
-			log.Fatalf("error in save fastcache dir: %s", err)
-		}
-		log.Printf("new cache created: %s", *cacheDir)
-	}
-
-	myCache.VisitAllEntries(func(k, v []byte) error {
-		log.Printf("VisitAllEntries callback: key %q, value %q", k, v)
-		return nil
-	})
-
-	//
-
 	tokens := map[string]uint64{}
 
 	if len(*ctrlToken) == 0 {
-		*ctrlToken, err = magicgate.RandToken(16)
+		*ctrlToken, err = utils.RandToken(16)
 		if err != nil {
 			log.Fatalf("Generate server control token failed: %v\n", err)
 		}
@@ -182,7 +171,7 @@ func main() {
 
 	if *apiTokens == "gentoken" {
 		for i := 0; i < 16; i++ {
-			*apiTokens, err = magicgate.RandToken(16)
+			*apiTokens, err = utils.RandToken(16)
 			if err != nil {
 				log.Fatalf("Generate api token failed: %v\n", err)
 			}
@@ -197,15 +186,14 @@ func main() {
 		var tk, tmpString string
 		var uid uint64
 		var cnt int = 1 //normal uid start from 1
-		*apiTokens = magicgate.LoopReplaceAll(*apiTokens, " ", "_")
+		*apiTokens = utils.LoopReplaceAll(*apiTokens, " ", "_")
 		for _, item := range strings.Split(*apiTokens, ",") {
 			if len(item) == 0 {
 				continue
 			}
 			tmp := strings.Split(item, ":")
 			if len(tmp) == 0 {
-				log.Printf("Invalid API TOKEN: %s\n", item)
-				continue
+				log.Fatalf("Invalid API TOKEN: %s\n", item)
 			}
 			cnt++
 			if len(tmp) == 1 {
@@ -228,10 +216,22 @@ func main() {
 		}
 	}
 
+	// load DataCache
+	dc, err := magicgate.LoadDataCache(*cacheDir, true, 2*1024*1024)
+	if err != nil {
+		log.Fatalf("error while load data: %s", err)
+	}
 	//
-	dataCache := magicgate.NewDataCache(tokens)
+
+	// proxyList = flag.String("rawproxy", "", "tcp/udp proxy, list format: <tcp|udp>:<frontend address>:<backend address|passive token>, address should be host:port, \npassive token use for backend connect to frontend")
+
+	proxyAuth := dc.ProxyAuthHandler()
+
+	myProxy := rawproxy.NewProxyServer(*proxyList, proxyAuth)
 
 	// merge tokens to dataCache
+	effected := dc.MergeTokens(tokens, true)
+	log.Printf("effected tokens: %v\n", effected)
 
 	// put custom in DefaultACME
 	certmagic.DefaultACME.Email = *certEmail
@@ -305,8 +305,12 @@ func main() {
 	tlsRouter.GET("/stats", expvarhandler.ExpvarHandler)
 	tlsRouter.GET("/api/ctrl/shutdown/:token", srv.ServerControlHandler)
 
-	tlsRouter.GET("/api/db/set/:token/:key/:value", dataCache.DataCacheHandler())
-	tlsRouter.GET("/api/db/list/:token", dataCache.JSONContentHandler())
+	tlsRouter.GET("/api/db/set/:token/:key/:value", dc.DataCacheSetKVHandler())
+	tlsRouter.GET("/api/db/get/:token/:key", dc.DataCacheGetKVHandler())
+	// Todo: tlsRouter.POST("/api/db/set/:token", dc.DataCacheJSONHandler())
+	tlsRouter.GET("/api/db/list/:token/:key", dc.DataCacheListKVHandler())
+
+	tlsRouter.GET("/api/db/setproxy/:token/:key/:value", dc.DataCacheSetProxyHandler())
 
 	// catch-all to trim prefix or service
 	tlsRouter.NotFound = tlsServiceHandler
@@ -316,9 +320,24 @@ func main() {
 	// or redirect without magic redirect info
 	tlsRouterHandler := srv.PrefixRedirectHandler(tlsRouter.Handler)
 
+	// ignore HUP and PIPE signals
+	utils.NoSIGHUP()
+	utils.NoSIGPIPE()
+
+	Todo: setup ljhk proxy
+
+	// start proxy server
+	if myProxy != nil {
+		log.Printf("Starting Proxy server ...\n")
+		for k, v := range myProxy.ForwardInfo() {
+			log.Printf("    %s <= %s\n", k, v)
+		}
+		myProxy.StartProxy()
+	}
+
 	// Start HTTP server.
 	if len(*addr) > 0 {
-		log.Printf("Starting HTTP server on %q", *addr)
+		log.Printf("Starting HTTP server on %q\n", *addr)
 
 		go func() {
 			if err := fasthttp.ListenAndServe(*addr, srv.ServerHandler(httpRouter.Handler)); err != nil {
@@ -329,18 +348,18 @@ func main() {
 
 	// alternate HTTP server, use tlsServiceHandler
 	if len(*addrAlt) > 0 {
-		log.Printf("Starting Alternate HTTP server on %q", *addrAlt)
+		log.Printf("Starting Alternate HTTP server on %q\n", *addrAlt)
 
 		go func() {
 			if err := fasthttp.ListenAndServe(*addrAlt, tlsRouterHandler); err != nil {
-				log.Fatalf("error in ListenAndServe: %s", err)
+				log.Fatalf("error in ListenAndServe: %s\n", err)
 			}
 		}()
 	}
 
 	// Start HTTPS server.
 	if len(*addrTLS) > 0 {
-		log.Printf("Starting HTTPS server on %q", *addrTLS)
+		log.Printf("Starting HTTPS server on %q\n", *addrTLS)
 
 		// Let's Encrypt tls-alpn-01 only works on port 443.
 		ln, err := net.Listen("tcp4", *addrTLS)
@@ -357,8 +376,8 @@ func main() {
 		}()
 	}
 
-	log.Printf("Serving files from directory %q", *docRoot)
-	log.Printf("See stats at http://%s/stats", *addr)
+	log.Printf("Serving files from directory %q\n", *docRoot)
+	log.Printf("See stats at http://%s/stats\n", *addrAlt)
 	// Wait forever.
 	select {}
 }

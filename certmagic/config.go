@@ -223,7 +223,7 @@ func newWithCache(certCache *Cache, cfg Config) *Config {
 		cfg.Storage = defaultFileStorage
 	}
 
-	// ensure the unexported fields are valid
+	// ensure the non-exported fields are valid
 	cfg.certCache = certCache
 
 	return &cfg

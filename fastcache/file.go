@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strings"
 
 	"github.com/golang/snappy"
 )
@@ -38,7 +37,7 @@ func (c *Cache) SaveToFile(filePath string) error {
 func (c *Cache) SaveToFileConcurrent(filePath string, concurrency int) error {
 	// trim right slash, user may supply a dir with right slash (/a/b/ccachedir/ or c:\a\b\cache\ in Windows),
 	// and filepath.Dir will return filePath it self, but the parrent dir of filePath is expected.
-	filePath = strings.TrimRight(filePath, "/\\")
+	filePath, _ = filepath.Abs(filePath)
 
 	// Create dir if it doesn't exist.
 	dir := filepath.Dir(filePath)
@@ -133,7 +132,7 @@ func (c *Cache) save(dir string, workersCount int) error {
 func load(filePath string, maxBytes int) (*Cache, error) {
 	// trim right slash, user may supply a dir with right slash (/a/b/ccachedir/ or c:\a\b\cache\ in Windows),
 	// and filepath.Dir will return filePath it self, but the parrent dir of filePath is expected.
-	filePath = strings.TrimRight(filePath, "/\\")
+	filePath, _ = filepath.Abs(filePath)
 
 	maxBucketChunks, err := loadMetadata(filePath)
 	if err != nil {
