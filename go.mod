@@ -35,13 +35,10 @@ replace github.com/wheelcomplex/lumberjack => /home/david/home/wheelcomplex/magi
 require (
 	github.com/buaazp/fasthttprouter v0.1.1
 	github.com/caddyserver/certmagic v0.12.0
-	github.com/klauspost/cpuid v1.3.1 // indirect
-	github.com/miekg/dns v1.1.32 // indirect
 	github.com/valyala/fasthttp v1.16.0
 	github.com/wheelcomplex/fastcache v1.5.7
 	github.com/wheelcomplex/lumberjack v0.0.0-00010101000000-000000000000
 	github.com/wheelcomplex/multiproxy v0.0.0-00010101000000-000000000000
 	go.uber.org/zap v1.16.0
-	golang.org/x/crypto v0.0.0-20201002170205-7f63de1d35b0
-	golang.org/x/sys v0.0.0-20201009025420-dfb3f7c4e634 // indirect
+	golang.org/x/crypto v0.0.0-20201012173705-84dcc777aaee
 )

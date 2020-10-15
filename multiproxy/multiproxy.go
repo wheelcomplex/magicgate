@@ -82,7 +82,7 @@ type ProxyConfig struct {
 	KeepaliveInterval time.Duration
 	KeepaliveTimeout  time.Duration
 	SynTimeout        time.Duration
-	Coolingtimeout    time.Duration
+	Coolingtimeout    int // cooling timeout in second, note: actually timeout is Coolingtimeout * time.Second
 
 	LogWriter   *lumberjack.Logger
 	AuthHandler ProxyAuthHandler
@@ -158,7 +158,7 @@ func NewDefaultConfig() *ProxyConfig {
 		KeepaliveInterval: 30 * time.Second,
 		KeepaliveTimeout:  1 * time.Second,
 		SynTimeout:        800 * time.Millisecond,
-		Coolingtimeout:    5 * time.Second,
+		Coolingtimeout:    5,
 		Forwards:          make(map[string]string),
 		LogWriter:         nil,
 		AuthHandler:       nil,
@@ -394,22 +394,21 @@ func (ps *ProxyServer) netIoCopy(proxyKey string, keepFront bool, frontConn, bac
 	select {
 	case err = <-frontErrChan:
 		log.Printf("frontend connection error: %s,  closing backend, %s -> %s, %s ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr(), err)
-		time.Sleep(2 * ps.cfg.SynTimeout)
-		if !keepFront {
-			frontConn.Close()
-		}
-		backConn.Close()
 		err = <-backErrChan
 		log.Printf("backend connection error: %s, closing %s -> %s, %s ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), err)
-	case err = <-backErrChan:
-		log.Printf("backend connection error: %s, closing frontend, %s -> %s, %s ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), err)
-		time.Sleep(2 * ps.cfg.SynTimeout)
-		backConn.Close()
 		if !keepFront {
 			frontConn.Close()
 		}
+		backConn.Close()
+	case err = <-backErrChan:
+		log.Printf("backend connection error: %s, closing frontend, %s -> %s, %s ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), err)
 		err = <-frontErrChan
 		log.Printf("frontend connection error: %s, closing %s -> %s, %s ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr(), err)
+		time.Sleep(2 * ps.cfg.SynTimeout)
+		if !keepFront {
+			frontConn.Close()
+		}
+		backConn.Close()
 	}
 	return err
 }
@@ -438,9 +437,13 @@ func (ps *ProxyServer) tcpServer(proxyKey string) {
 
 			alive = false
 			for addrKey := range ps.proxyMap[proxyKey].backends {
+				log.Printf("backends cooling, %s, backend %s, now %d - %d = %d ...\n", proxyKey, addrKey, time.Now().Unix(), ps.proxyMap[proxyKey].errorTTL[addrKey], time.Now().Unix()-ps.proxyMap[proxyKey].errorTTL[addrKey])
 				if time.Now().Unix() > ps.proxyMap[proxyKey].errorTTL[addrKey] {
+					log.Printf("backends cooling, %s, backend %s, alive ...\n", proxyKey, addrKey)
 					alive = true
 					break
+				} else {
+					log.Printf("backends cooling, %s, backend %s, cooling ...\n", proxyKey, addrKey)
 				}
 			}
 
@@ -544,7 +547,7 @@ func (ps *ProxyServer) udpBackend(proxyKey string, frontConn *net.UDPConn) {
 				log.Printf("all backends removed, %s, waiting %d ...\n", proxyKey, ps.cfg.Coolingtimeout)
 				allCooling = true
 			}
-			time.Sleep(5 * ps.cfg.Coolingtimeout)
+			time.Sleep(time.Duration(ps.cfg.Coolingtimeout / 10))
 			continue
 		}
 
@@ -553,7 +556,7 @@ func (ps *ProxyServer) udpBackend(proxyKey string, frontConn *net.UDPConn) {
 				log.Printf("all backends cooling, %s, waiting %d ...\n", proxyKey, ps.cfg.Coolingtimeout)
 				allCooling = true
 			}
-			time.Sleep(ps.cfg.Coolingtimeout)
+			time.Sleep(time.Duration(ps.cfg.Coolingtimeout / 10))
 			continue
 		}
 

@@ -23,6 +23,13 @@ sudo ${GOPATH}/bin//dlv --continue --listen=:2345 --headless=true --log=true --l
 
 * use sudo to allow app bind to port 443/80
 
+* [configure sudo to allow no password](https://www.cyberciti.biz/faq/linux-unix-running-sudo-command-without-a-password/)
+
+```bash
+#for vscode debugging, application bind to 80/443
+%sudo   ALL=(ALL) NOPASSWD: /sbin/setcap
+```
+
 ## example
 
 ```bash
