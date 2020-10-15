@@ -37,7 +37,8 @@ type ProxyCtx struct {
 	linkProtocol string
 	appProtocol  string
 
-	conn *net.Conn
+	frontConn net.Conn
+	backConn  net.Conn
 }
 
 // LocalAddr returns local address for the given request.
@@ -364,21 +365,98 @@ func (ps *ProxyServer) ForwardInfo() map[string]string {
 	return forwards
 }
 
+// netIoCopy do io.Copy between backConn, frontConn,
+// return latest err
+func (ps *ProxyServer) netIoCopy(proxyKey string, keepFront bool, frontConn, backConn net.Conn) (err error) {
+
+	// Todo: make it works on UDP
+	// send to backend is ok, but read from backend and write to frontend:write udp [::]:53: write: destination address required; 0 bytes forwarded
+
+	frontErrChan := make(chan error, 1)
+	backErrChan := make(chan error, 1)
+
+	// Todo: identify which endpoint is in error
+	go func(backConn, frontConn net.Conn) {
+		w, err := io.Copy(frontConn, backConn)
+		log.Printf("frontend connection closed: %v; %v bytes forwarded\n", err, w)
+		log.Printf("copy to backend: %s, %s+%s -> %s+%s, %v, %v ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr(), backConn.LocalAddr(), backConn.RemoteAddr(), w, err)
+		frontErrChan <- err
+	}(backConn, frontConn)
+	go func(backConn, frontConn net.Conn) {
+		w, err := io.Copy(backConn, frontConn)
+		log.Printf("backend connection closed: %v; %v bytes forwarded\n", err, w)
+		log.Printf("copy to frontend: %s, %s+%s -> %s+%s, %v, %v ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), frontConn.LocalAddr(), frontConn.RemoteAddr(), w, err)
+		backErrChan <- err
+	}(backConn, frontConn)
+
+	// exit until both connections closed
+	select {
+	case err = <-frontErrChan:
+		log.Printf("frontend connection error: %s,  closing backend, %s -> %s, %s ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr(), err)
+		time.Sleep(2 * ps.cfg.SynTimeout)
+		if !keepFront {
+			frontConn.Close()
+		}
+		backConn.Close()
+		err = <-backErrChan
+		log.Printf("backend connection error: %s, closing %s -> %s, %s ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), err)
+	case err = <-backErrChan:
+		log.Printf("backend connection error: %s, closing frontend, %s -> %s, %s ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), err)
+		time.Sleep(2 * ps.cfg.SynTimeout)
+		backConn.Close()
+		if !keepFront {
+			frontConn.Close()
+		}
+		err = <-frontErrChan
+		log.Printf("frontend connection error: %s, closing %s -> %s, %s ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr(), err)
+	}
+	return err
+}
+
 // tcpServer run a tcp proxy server,
 func (ps *ProxyServer) tcpServer(proxyKey string) {
 	log.Printf("tcp proxying for %s ...\n", proxyKey)
 	entry := ps.proxyMap[proxyKey]
+	var alive, allcooling, nonbackend bool
 	for {
-		conn, err := entry.tcpListener.AcceptTCP()
+		frontConn, err := entry.tcpListener.AcceptTCP()
 		if err != nil {
 			log.Printf("failed to accept connection from %s: %v\n", proxyKey, err)
 			time.Sleep(500 * time.Millisecond)
 		} else {
-			log.Printf("new connection: %s: %s <- %s\n", proxyKey, conn.LocalAddr(), conn.RemoteAddr())
-			go func(conn *net.TCPConn) {
-				// copy conn
-				ps.tcpBackend(proxyKey, conn)
-			}(conn)
+			log.Printf("new connection: %s: %s <- %s\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr())
+			if len(ps.proxyMap[proxyKey].backends) == 0 {
+				if !nonbackend {
+					log.Printf("all backends removed, %s, closing frontend %s <- %s ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr())
+					nonbackend = true
+				}
+				frontConn.Close()
+				continue
+			}
+			nonbackend = false
+
+			alive = false
+			for addrKey := range ps.proxyMap[proxyKey].backends {
+				if time.Now().Unix() > ps.proxyMap[proxyKey].errorTTL[addrKey] {
+					alive = true
+					break
+				}
+			}
+
+			if !alive {
+				if !allcooling {
+					log.Printf("all backends cooling, %s, closing frontend %s <- %s ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr())
+					allcooling = true
+				}
+				frontConn.Close()
+				continue
+			}
+			allcooling = false
+
+			go func(frontConn *net.TCPConn) {
+				// copy frontConn
+				ps.tcpBackend(proxyKey, frontConn)
+			}(frontConn)
 		}
 	}
 }
@@ -389,14 +467,10 @@ func (ps *ProxyServer) tcpBackend(proxyKey string, frontConn *net.TCPConn) {
 	var backConn *net.TCPConn
 	var tmpConn net.Conn
 	var err error
-	frontErrChan := make(chan error, 1)
-	backErrChan := make(chan error, 1)
-	var exitLoop bool
 
 	log.Printf("tcp backend for %s, front %s+%s ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr())
 
-	var allCooling bool
-	for !exitLoop {
+	for {
 		// look for a backend and try to connect
 
 		backConn = nil
@@ -404,75 +478,28 @@ func (ps *ProxyServer) tcpBackend(proxyKey string, frontConn *net.TCPConn) {
 		var backAddr net.Addr
 		for addrKey, backAddr = range entry.backends {
 			if time.Now().Unix() < entry.errorTTL[addrKey] {
-				if !allCooling {
-					log.Printf("backend is cooling: %s/%s/%d/%d\n", proxyKey, backAddr.String(), entry.errorTTL[addrKey]-time.Now().Unix(), ps.cfg.Coolingtimeout)
-				}
 				continue
 			}
-			log.Printf("connecting to backend: %s/%s/%d ...\n", proxyKey, backAddr.String(), ps.cfg.SynTimeout)
+			log.Printf("connecting to backend: %s, %s/%d ...\n", proxyKey, backAddr.String(), ps.cfg.SynTimeout)
 			tmpConn, err = net.DialTimeout("tcp", backAddr.String(), ps.cfg.SynTimeout)
 			if err != nil {
-				log.Printf("connect to backend: %s/%s/%s ...\n", proxyKey, backAddr.String(), err)
+				log.Printf("connect to backend: %s, %s/%s ...\n", proxyKey, backAddr.String(), err)
 				entry.errorTTL[addrKey] = time.Now().Unix() + int64(ps.cfg.Coolingtimeout)
 				continue
 			}
-			allCooling = false
 			backConn = tmpConn.(*net.TCPConn)
 			log.Printf("connected to backend:  %s, %s, local %s -> remote %s ...\n", proxyKey, backAddr.String(), backConn.LocalAddr(), backConn.RemoteAddr())
 			break
 		}
 
-		if len(entry.backends) == 0 {
-			if !allCooling {
-				log.Printf("all backends removed, %s, waiting %d ...\n", proxyKey, ps.cfg.Coolingtimeout)
-				allCooling = true
-			}
-			time.Sleep(5 * ps.cfg.Coolingtimeout)
-			continue
-		}
-
 		if backConn == nil {
-			if !allCooling {
-				log.Printf("all backends cooling, %s, waiting %d ...\n", proxyKey, ps.cfg.Coolingtimeout)
-				allCooling = true
-			}
-			time.Sleep(ps.cfg.Coolingtimeout)
-			continue
+			log.Printf("all backends cooling, %s, closing frontend %s <- %s ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr())
+			frontConn.Close()
+			return
 		}
 
-		// Todo: identify which endpoint is in error
-		go func(backConn, frontConn *net.TCPConn) {
-			w, err := io.Copy(frontConn, backConn)
-			log.Printf("frontend TCP connection closed: %v; %v bytes forwarded\n", err, w)
-			log.Printf("copy to backend: %s/%s+%s -> %s+%s, %v, %v ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr(), backConn.LocalAddr(), backConn.RemoteAddr(), w, err)
-			frontErrChan <- err
-		}(backConn, frontConn)
-		go func(backConn, frontConn *net.TCPConn) {
-			w, err := io.Copy(backConn, frontConn)
-			log.Printf("backend TCP connection closed: %v; %v bytes forwarded\n", err, w)
-			log.Printf("copy to frontend: %s/%s+%s -> %s+%s, %v, %v ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), frontConn.LocalAddr(), frontConn.RemoteAddr(), w, err)
-			backErrChan <- err
-		}(backConn, frontConn)
-
-		// exit until both connections closed
-		select {
-		case err = <-frontErrChan:
-			log.Printf("frontend connection error: %s/%s -> %s, %s, closing backend ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr(), err)
-			time.Sleep(2 * ps.cfg.SynTimeout)
-			frontConn.Close()
-			backConn.Close()
-			exitLoop = true
-			err = <-backErrChan
-			log.Printf("backend connection error: %s/%s -> %s, %s, closing ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), err)
-		case err = <-backErrChan:
-			log.Printf("backend connection error: %s/%s -> %s, %s, closing frontend ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), err)
-			time.Sleep(2 * ps.cfg.SynTimeout)
-			backConn.Close()
-			frontConn.Close()
-			exitLoop = true
-			err = <-frontErrChan
-			log.Printf("frontend connection error: %s/%s -> %s, %s, closing ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr(), err)
-		}
+		ps.netIoCopy(proxyKey, false, frontConn, backConn)
+		return
 	}
 }
 
@@ -482,12 +509,10 @@ func (ps *ProxyServer) udpBackend(proxyKey string, frontConn *net.UDPConn) {
 	var backConn *net.UDPConn
 	var tmpConn net.Conn
 	var err error
-	frontErrChan := make(chan error, 1)
-	backErrChan := make(chan error, 1)
-	var exitLoop bool
+
 	var allCooling bool
 	log.Printf("udp backend for %s, front %s+%s ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr())
-	for !exitLoop {
+	for {
 		// look for a backend and try to connect
 
 		backConn = nil
@@ -496,14 +521,14 @@ func (ps *ProxyServer) udpBackend(proxyKey string, frontConn *net.UDPConn) {
 		for addrKey, backAddr = range entry.backends {
 			if time.Now().Unix() < entry.errorTTL[addrKey] {
 				if !allCooling {
-					log.Printf("backend is cooling: %s/%s/%d/%d\n", proxyKey, backAddr.String(), entry.errorTTL[addrKey]-time.Now().Unix(), ps.cfg.Coolingtimeout)
+					log.Printf("backend is cooling: %s, %s/%d/%d\n", proxyKey, backAddr.String(), entry.errorTTL[addrKey]-time.Now().Unix(), ps.cfg.Coolingtimeout)
 				}
 				continue
 			}
-			log.Printf("connecting to backend: %s/%s/%d ...\n", proxyKey, backAddr.String(), ps.cfg.SynTimeout)
+			log.Printf("connecting to backend: %s, %s/%d ...\n", proxyKey, backAddr.String(), ps.cfg.SynTimeout)
 			tmpConn, err = net.DialTimeout("udp", backAddr.String(), ps.cfg.SynTimeout)
 			if err != nil {
-				log.Printf("connect to backend: %s/%s/%s ...\n", proxyKey, backAddr.String(), err)
+				log.Printf("connect to backend: %s, %s/%s ...\n", proxyKey, backAddr.String(), err)
 				entry.errorTTL[addrKey] = time.Now().Unix() + int64(ps.cfg.Coolingtimeout)
 				continue
 			}
@@ -531,33 +556,8 @@ func (ps *ProxyServer) udpBackend(proxyKey string, frontConn *net.UDPConn) {
 			continue
 		}
 
-		// Todo: identify which endpoint is in error
-		go func(frontConn, backConn *net.UDPConn) {
-			w, err := io.Copy(frontConn, backConn)
-			log.Printf("frontend UDP connection closed: %v; %v bytes forwarded\n", err, w)
-			log.Printf("copy to backend: %s/%s+%s -> %s+%s, %v, %v ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr(), backConn.LocalAddr(), backConn.RemoteAddr(), w, err)
-			frontErrChan <- err
-		}(frontConn, backConn)
-		go func(frontConn, backConn *net.UDPConn) {
-			w, err := io.Copy(backConn, frontConn)
-			log.Printf("backend UDP connection closed: %v; %v bytes forwarded\n", err, w)
-			log.Printf("copy to frontend: %s/%s+%s -> %s+%s, %v, %v ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), frontConn.LocalAddr(), frontConn.RemoteAddr(), w, err)
-			backErrChan <- err
-		}(frontConn, backConn)
-
-		select {
-		case err = <-frontErrChan:
-			log.Printf("frontend connection error: %s/%s -> %s, %s, closing ...\n", proxyKey, frontConn.LocalAddr(), frontConn.RemoteAddr(), err)
-			time.Sleep(2 * ps.cfg.SynTimeout)
-			frontConn.Close()
-			backConn.Close()
-			exitLoop = true
-		case err = <-backErrChan:
-			log.Printf("backend connection error: %s/%s -> %s, %s, retry ...\n", proxyKey, backConn.LocalAddr(), backConn.RemoteAddr(), err)
-			time.Sleep(2 * ps.cfg.SynTimeout)
-			backConn.Close()
-			exitLoop = true
-		}
+		ps.netIoCopy(proxyKey, true, frontConn, backConn)
+		// continue for next connect
 	}
 }
 
@@ -573,6 +573,26 @@ func (ps *ProxyServer) StartProxy() {
 	// launch listener
 	for proxyKey, entry := range ps.proxyMap {
 		if entry.proto == "udp" {
+
+			// udp should listen on all local ip
+
+			// ifaces, err := net.Interfaces()
+			// // handle err
+			// for _, i := range ifaces {
+			// 	addrs, err := i.Addrs()
+			// 	// handle err
+			// 	for _, addr := range addrs {
+			// 		var ip net.IP
+			// 		switch v := addr.(type) {
+			// 		case *net.IPNet:
+			// 			ip = v.IP
+			// 		case *net.IPAddr:
+			// 			ip = v.IP
+			// 		}
+			// 		// process IP address
+			// 	}
+			// }
+
 			ps.proxyMap[proxyKey].udpConn, err = net.ListenUDP("udp", entry.frontAddr.(*net.UDPAddr))
 			if err != nil {
 				log.Fatalf("Failed to setup UDP listener on `%s`: %v\n", entry.frontAddr, err)
