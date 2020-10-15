@@ -34,9 +34,9 @@ var (
 	ctrlToken          = flag.String("ctrltoken", "", "a token to control server from client, URI: /api/ctrl/shutdown/*token")
 	trimList           = flag.String("trimlist", "", "redirect www.example.com or blog.example.com to example.com, when --trimlist=www,blog")
 	runProd            = flag.Bool("prod", false, "run on production environment")
-	addr               = flag.String("addr", "0.0.0.0:80", "TCP address to listen for HTTP")
+	addr               = flag.String("addr", "0.0.0.0:8080", "TCP address to listen for HTTP")
 	addrAlt            = flag.String("addrAlt", "0.0.0.0:9080", "alternate TCP address to listen for HTTP, as backend for reverse proxy")
-	addrTLS            = flag.String("addrTLS", "0.0.0.0:443", "TCP address to listen to TLS (aka SSL or HTTPS) requests. Leave empty for disabling TLS")
+	addrTLS            = flag.String("addrTLS", "0.0.0.0:8443", "TCP address to listen to TLS (aka SSL or HTTPS) requests. Leave empty for disabling TLS")
 	byteRange          = flag.Bool("byteRange", true, "Enables byte range requests if set to true")
 	compress           = flag.Bool("compress", true, "Enables transparent response compression if set to true")
 	docRoot            = flag.String("docroot", "/var/www", "Directory to serve static files from")
@@ -56,8 +56,34 @@ func main() {
 	// Parse command-line flags.
 	flag.Parse()
 
+	var logWriter *lumberjack.Logger
+	if len(*logDir) > 0 {
+		*logDir, _ = filepath.Abs(*logDir)
+		log.Printf("LogDir: %s\n", *logDir)
+		if err := os.MkdirAll(*logDir, 0700); err != nil {
+			log.Fatalf("error in create log dir: %s", err)
+		}
+
+		logWriter = &lumberjack.Logger{
+			Filename:   *logDir + "/main.log",
+			MaxSize:    500, // megabytes
+			MaxBackups: 3,
+			MaxAge:     28,    //days
+			Compress:   false, // disabled by default
+		}
+
+		log.Printf("Magicgate v1.0\n")
+		log.Printf("%s\n", time.Now().Format("2006-01-02 15:04:05.000000"))
+
+		log.Printf("logging to file: %s\n", logWriter.Filename)
+		log.SetOutput(logWriter)
+	} else {
+		log.Printf("Logging to file disabled.\n")
+	}
+
 	log.Printf("Magicgate v1.0\n")
 	log.Printf("%s\n", time.Now().Format("2006-01-02 15:04:05.000000"))
+
 	//
 	*certDir, _ = filepath.Abs(*certDir)
 	log.Printf("CertDir: %s\n", *certDir)
@@ -69,26 +95,6 @@ func main() {
 	if err := os.MkdirAll(*cacheDir, 0700); err != nil {
 		log.Fatalf("error in create fastcache dir: %s", err)
 	}
-
-	*logDir, _ = filepath.Abs(*logDir)
-	log.Printf("LogDir: %s\n", *logDir)
-	if err := os.MkdirAll(*logDir, 0700); err != nil {
-		log.Fatalf("error in create log dir: %s", err)
-	}
-
-	logWriter := &lumberjack.Logger{
-		Filename:   *logDir + "/main.log",
-		MaxSize:    500, // megabytes
-		MaxBackups: 3,
-		MaxAge:     28,    //days
-		Compress:   false, // disabled by default
-	}
-
-	log.Printf("logging to file: %s\n", logWriter.Filename)
-	log.SetOutput(logWriter)
-
-	log.Printf("Magicgate v1.0\n")
-	log.Printf("%s\n", time.Now().Format("2006-01-02 15:04:05.000000"))
 
 	logger := zap.NewExample()
 	defer logger.Sync()
@@ -247,8 +253,6 @@ func main() {
 		log.Fatalf("error while load data: %s", err)
 	}
 	//
-
-	// proxyList = flag.String("rawproxy", "", "tcp/udp proxy, list format: <tcp|udp>:<frontend address>:<backend address|passive token>, address should be host:port, \npassive token use for backend connect to frontend")
 
 	proxyAuth := dc.ProxyAuthHandler()
 

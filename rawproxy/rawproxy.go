@@ -93,6 +93,9 @@ type ProxyConfig struct {
 // word "passive" as backend means backend connection initial from peer,
 // example: tcp/0.0.0.0:80/10.0.0.2:8080,10.0.0.3:9080+udp/0.0.0.0:53/10.0.0.2:5353,passive
 func NewListConfig(list string, authHandler ProxyAuthHandler, logWriter *lumberjack.Logger) *ProxyConfig {
+	if len(list) == 0 {
+		return nil
+	}
 	if logWriter != nil {
 		log.SetOutput(logWriter)
 	}
@@ -216,18 +219,16 @@ type ProxyServer struct {
 
 // NewProxyServerByConf return a ProxyServer base on input proxy list
 func NewProxyServerByConf(cfg *ProxyConfig) *ProxyServer {
+	if cfg == nil {
+		log.Printf("nil proxy config: %s\n", cfg)
+		return nil
+	}
 	ps := &ProxyServer{
 		proxyMap:    make(map[string]*forwardEntry),
 		sessions:    make(map[uint64]*ProxyCtx),
 		cfg:         cfg,
 		authHandler: cfg.AuthHandler,
 	}
-
-	if cfg == nil {
-		log.Fatalf("invalid proxy config: %s\n", cfg)
-		return nil
-	}
-
 	// parse cfg.Forwards
 	if err := ps.AddForwardMap(ps.cfg.Forwards); err != nil {
 		log.Fatalf("invalid proxy config: %s\n", err)
