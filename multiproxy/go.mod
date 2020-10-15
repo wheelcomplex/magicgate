@@ -1,4 +1,4 @@
-module github.com/wheelcomplex/rawproxy
+module github.com/wheelcomplex/multiproxy
 
 go 1.16
 

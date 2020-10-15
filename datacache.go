@@ -16,7 +16,7 @@ import (
 	"github.com/valyala/fasthttp"
 	"github.com/wheelcomplex/fastcache"
 	"github.com/wheelcomplex/magicgate/utils"
-	"github.com/wheelcomplex/rawproxy"
+	"github.com/wheelcomplex/multiproxy"
 )
 
 var (
@@ -477,8 +477,8 @@ func (dc *DataCache) JSONContentHandler() fasthttp.RequestHandler {
 
 // ProxyAuthHandler return a fasthttp.RequestHandler which can update proxy setting by token/key/value,
 // tlsRouter.GET("/api/db/setproxy/:token/:key/:value", dc.DataCacheSetKVHandler())
-func (dc *DataCache) ProxyAuthHandler() rawproxy.ProxyAuthHandler {
-	return func(ctx *rawproxy.ProxyCtx) error {
+func (dc *DataCache) ProxyAuthHandler() multiproxy.ProxyAuthHandler {
+	return func(ctx *multiproxy.ProxyCtx) error {
 		log.Printf("ProxyAuthHandler(%s <= %s), auth %s\n", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.AuthInfo)
 		return nil
 	}

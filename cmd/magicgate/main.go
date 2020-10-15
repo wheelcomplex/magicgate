@@ -24,7 +24,7 @@ import (
 	"github.com/wheelcomplex/lumberjack"
 	"github.com/wheelcomplex/magicgate"
 	"github.com/wheelcomplex/magicgate/utils"
-	"github.com/wheelcomplex/rawproxy"
+	"github.com/wheelcomplex/multiproxy"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/acme"
 )
@@ -254,10 +254,6 @@ func main() {
 	}
 	//
 
-	proxyAuth := dc.ProxyAuthHandler()
-
-	myProxy := rawproxy.NewProxyServer(*proxyList, proxyAuth, logWriter)
-
 	// merge tokens to dataCache
 	effected := dc.MergeTokens(tokens, true)
 	log.Printf("effected tokens: %v\n", effected)
@@ -354,7 +350,8 @@ func main() {
 	utils.NoSIGPIPE()
 
 	// start proxy server
-	if myProxy != nil {
+	if len(*proxyList) > 0 {
+		myProxy := multiproxy.NewProxyServer(*proxyList, dc.ProxyAuthHandler(), logWriter)
 		log.Printf("Starting Proxy server ...\n")
 		for k, v := range myProxy.ForwardInfo() {
 			log.Printf("    %s <= %s\n", k, v)

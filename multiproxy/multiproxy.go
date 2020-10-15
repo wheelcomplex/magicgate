@@ -1,7 +1,7 @@
-// rawproxy is a package for create tcp/udp proxy,
+// multiproxy is a package for create tcp/udp proxy,
 // from https://github.com/arkadijs/goproxy
 
-package rawproxy
+package multiproxy
 
 import (
 	"io"
@@ -220,7 +220,7 @@ type ProxyServer struct {
 // NewProxyServerByConf return a ProxyServer base on input proxy list
 func NewProxyServerByConf(cfg *ProxyConfig) *ProxyServer {
 	if cfg == nil {
-		log.Printf("nil proxy config: %s\n", cfg)
+		log.Printf("nil proxy config: %v\n", cfg)
 		return nil
 	}
 	ps := &ProxyServer{

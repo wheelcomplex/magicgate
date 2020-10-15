@@ -26,7 +26,7 @@ replace github.com/wheelcomplex/fastcache v1.5.7 => /home/david/home/wheelcomple
 
 replace github.com/wheelcomplex/magicgate => /home/david/home/wheelcomplex/magicgate/magicgate
 
-replace github.com/wheelcomplex/rawproxy => /home/david/home/wheelcomplex/magicgate/rawproxy
+replace github.com/wheelcomplex/multiproxy => /home/david/home/wheelcomplex/magicgate/multiproxy
 
 replace github.com/wheelcomplex/utils => /home/david/home/wheelcomplex/magicgate/utils
 
@@ -40,7 +40,7 @@ require (
 	github.com/valyala/fasthttp v1.16.0
 	github.com/wheelcomplex/fastcache v1.5.7
 	github.com/wheelcomplex/lumberjack v0.0.0-00010101000000-000000000000
-	github.com/wheelcomplex/rawproxy v0.0.0-00010101000000-000000000000
+	github.com/wheelcomplex/multiproxy v0.0.0-00010101000000-000000000000
 	go.uber.org/zap v1.16.0
 	golang.org/x/crypto v0.0.0-20201002170205-7f63de1d35b0
 	golang.org/x/sys v0.0.0-20201009025420-dfb3f7c4e634 // indirect
