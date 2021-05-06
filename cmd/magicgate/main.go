@@ -49,6 +49,7 @@ var (
 	defaultServerName  = flag.String("defaultservername", "", "Default server name for ssl cert when not servername supply from client")
 	certEmail          = flag.String("certemail", "", "Administrator Email for cert")
 	apiTokens          = flag.String("apitoken", "gentoken", "api token list: '<token>:[uid],<token>:[uid]', if set to 'gentoken' will generate 16 tokens for test")
+	noHttpRedirect     = flag.Bool("noHttpRedirect", false, "do not redirect http requests to TLS")
 )
 
 func main() {
@@ -309,22 +310,29 @@ func main() {
 	}
 	// get tlsCfg for tls finally
 
+	// check domain acl
+	fileServiceHandler := srv.ServerHandler(func(ctx *fasthttp.RequestCtx) {
+		fsHandler(ctx)
+		updateFSCounters(ctx)
+	})
+
 	// http routing
 	// handler ACME or redirect to tls
 	httpRouter := fasthttprouter.New()
 	httpRouter.GET("/stats", expvarhandler.ExpvarHandler)
 	httpRouter.GET("/stat", expvarhandler.ExpvarHandler)
 	httpRouter.GET("/.well-known/acme-challenge/*token", srv.FastHTTPChallengeHandler(myACMEManager, nil))
-	// catch-all to redirect
-	httpRouter.NotFound = srv.RedirectToTLSHandler()
-	// or trim prefix and redirect to tls
-	// httpRouter.NotFound = srv.PrefixTLSRedirectHandler()
+	if *noHttpRedirect {
+		log.Printf("HTTP to TLS redirecting disabled\n")
 
-	// check domain acl
-	tlsServiceHandler := srv.ServerHandler(func(ctx *fasthttp.RequestCtx) {
-		fsHandler(ctx)
-		updateFSCounters(ctx)
-	})
+		httpRouter.NotFound = fileServiceHandler
+
+	} else {
+		// catch-all to redirect
+		httpRouter.NotFound = srv.RedirectToTLSHandler()
+		// or trim prefix and redirect to tls
+		// httpRouter.NotFound = srv.PrefixTLSRedirectHandler()
+	}
 
 	tlsRouter := fasthttprouter.New()
 	tlsRouter.GET("/stats", expvarhandler.ExpvarHandler)
@@ -339,7 +347,7 @@ func main() {
 	tlsRouter.GET("/api/db/setproxy/:token/:key/:value", dc.DataCacheSetProxyHandler())
 
 	// catch-all to trim prefix or service
-	tlsRouter.NotFound = tlsServiceHandler
+	tlsRouter.NotFound = fileServiceHandler
 
 	// try to redirect first and goto router
 	// tlsRouterHandler := srv.MagicServerImp(srv.PrefixRedirectHandler(nil), tlsRouter.Handler)
@@ -371,7 +379,7 @@ func main() {
 		}()
 	}
 
-	// alternate HTTP server, use tlsServiceHandler
+	// alternate HTTP server, use fileServiceHandler
 	if len(*addrAlt) > 0 {
 		log.Printf("Starting Alternate HTTP server on %q\n", *addrAlt)
 
