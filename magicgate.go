@@ -17,6 +17,14 @@ import (
 	"github.com/wheelcomplex/magicgate/utils"
 )
 
+// PathMapEntry record a path to URL mapping
+type PathMapEntry struct {
+	URL      []byte
+	Path     []byte
+	OrigPath []byte
+	FS       *fasthttp.FS
+}
+
 // HostStat record stat of a backend host
 type HostStat struct {
 }

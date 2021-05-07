@@ -50,6 +50,7 @@ var (
 	certEmail          = flag.String("certemail", "", "Administrator Email for cert")
 	apiTokens          = flag.String("apitoken", "gentoken", "api token list: '<token>:[uid],<token>:[uid]', if set to 'gentoken' will generate 16 tokens for test")
 	noHttpRedirect     = flag.Bool("noHttpRedirect", false, "do not redirect http requests to TLS")
+	pathMap            = flag.String("pathMap", "", "support url path alias, URL path : file system path, --pathMap=/alias/for/abs:/abspath,/relative/pathmap:./cwdpath")
 )
 
 func main() {
@@ -154,6 +155,45 @@ func main() {
 		log.Printf("TRIM HOST PREFIX: %s\n", item)
 	}
 
+	// pathMap
+	var pathMapList = []*magicgate.PathMapEntry{}
+
+	// docRroot
+
+	*docRoot, _ = filepath.Abs(*docRoot)
+
+	*pathMap = utils.LoopReplaceAll(*pathMap, " ", ",")
+	*pathMap = filepath.Clean(*pathMap)
+
+	// docRoot must be the first one
+	pathMapList = append(pathMapList, &magicgate.PathMapEntry{
+		URL:      []byte("/"),
+		Path:     []byte(*docRoot),
+		OrigPath: []byte(*docRoot),
+	})
+
+	for _, item := range strings.Split(*pathMap, ",") {
+		// URL path : file system path, --pathMap=/alias/for/abs:/abspath,/relative/pathmap:./cwdpath
+		pairs := strings.Split(item, ":")
+		if len(pairs) != 2 {
+			log.Printf("Invalid path map: %s\n", item)
+			continue
+		}
+		fsPath := filepath.Clean(pairs[1])
+		if !filepath.IsAbs(fsPath) {
+			fsPath = *docRoot + string(os.PathSeparator) + fsPath
+		}
+		if len(pairs[0]) == 0 || len(fsPath) == 0 {
+			log.Printf("Invalid path map: %s\n", item)
+			continue
+		}
+		pathMapList = append(pathMapList, &magicgate.PathMapEntry{
+			URL:      []byte(pairs[0]),
+			Path:     []byte(fsPath),
+			OrigPath: []byte(pairs[1]),
+		})
+	}
+
 	//
 	srv := &magicgate.ServerImp{
 		Counter:           1,
@@ -173,19 +213,39 @@ func main() {
 		log.Printf("Requested URI NOT FOUND: (%s) %s%s\n", ctx.Request.URI().String(), *docRoot, ctx.Path())
 	}
 
-	fs := &fasthttp.FS{
-		Root:               *docRoot,
-		IndexNames:         []string{"index.html"},
-		GenerateIndexPages: *generateIndexPages,
-		Compress:           *compress,
-		AcceptByteRange:    *byteRange,
-		PathNotFound:       fsPathNotFoundHandler,
+	// path map
+
+	for i, item := range pathMapList {
+		log.Printf("URL ALIAS: %s <= %s (%s)\n", item.URL, item.Path, item.OrigPath)
+		item.FS = &fasthttp.FS{
+			Root:               string(item.Path),
+			IndexNames:         []string{"index.html"},
+			GenerateIndexPages: *generateIndexPages,
+			Compress:           *compress,
+			AcceptByteRange:    *byteRange,
+		}
+		if *vhost {
+			item.FS.PathRewrite = fasthttp.NewVHostPathRewriter(0)
+		}
+		// check order is important
+		if i == len(pathMapList)-1 {
+			// last one
+			item.FS.PathNotFound = fsPathNotFoundHandler
+			continue
+		}
+		if i == 0 {
+			// first, if there is only one, will not match here
+			item.FS.PathNotFound = nil
+		} else {
+			//
+			pathMapList[i-1].FS.PathNotFound = item.FS.NewRequestHandler()
+		}
 	}
 
-	if *vhost {
-		fs.PathRewrite = fasthttp.NewVHostPathRewriter(0)
-	}
-	fsHandler := fs.NewRequestHandler()
+	// first handler in list
+	fsHandler := pathMapList[0].FS.NewRequestHandler()
+
+	// TODO: test path map
 
 	tokens := map[string]uint64{}
 
