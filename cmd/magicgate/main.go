@@ -1,5 +1,15 @@
 // A multiple function gateway include http/https/dns server with auto let's encrypt (by certmagic)
 
+/*
+1. tls server autocert
+2. http autoredirect to tls
+3. tcp/udp proxy
+4. tls+websocket proxy
+5. domain acl
+6. domain base path alias
+
+*/
+
 package main
 
 // Todo: reverse proxy, remote ip register/datacache
@@ -158,22 +168,9 @@ func main() {
 	// pathMap
 	var pathMapList = []*magicgate.PathMapEntry{}
 
-	// docRroot
-
-	*docRoot, _ = filepath.Abs(*docRoot)
-
-	*pathMap = utils.LoopReplaceAll(*pathMap, " ", ",")
-	*pathMap = filepath.Clean(*pathMap)
-
-	// docRoot must be the first one
-	pathMapList = append(pathMapList, &magicgate.PathMapEntry{
-		URL:      []byte("/"),
-		Path:     []byte(*docRoot),
-		OrigPath: []byte(*docRoot),
-	})
-
 	for _, item := range strings.Split(*pathMap, ",") {
-		// URL path : file system path, --pathMap=/alias/for/abs:/abspath,/relative/pathmap:./cwdpath
+		// URL path : file system path, --pathMap=[wildcard domain@]/alias/for/abs:/abspath,/relative/pathmap:./cwdpath
+
 		pairs := strings.Split(item, ":")
 		if len(pairs) != 2 {
 			log.Printf("Invalid path map: %s\n", item)
@@ -183,12 +180,25 @@ func main() {
 		if !filepath.IsAbs(fsPath) {
 			fsPath = *docRoot + string(os.PathSeparator) + fsPath
 		}
-		if len(pairs[0]) == 0 || len(fsPath) == 0 {
+
+		// remove invalid @
+		url := strings.Trim(pairs[0], "@")
+
+		domain := ""
+		p := strings.Index(url, "@")
+		if p == -1 {
+			domain = "*"
+		} else {
+			domain = url[0:p]
+			url = url[p+1:]
+		}
+		if len(url) == 0 || len(fsPath) == 0 {
 			log.Printf("Invalid path map: %s\n", item)
 			continue
 		}
 		pathMapList = append(pathMapList, &magicgate.PathMapEntry{
-			URL:      []byte(pairs[0]),
+			Domain:   domain,
+			URL:      []byte(url),
 			Path:     []byte(fsPath),
 			OrigPath: []byte(pairs[1]),
 		})
@@ -213,37 +223,16 @@ func main() {
 		log.Printf("Requested URI NOT FOUND: (%s) %s%s\n", ctx.Request.URI().String(), *docRoot, ctx.Path())
 	}
 
-	// path map
+	// docRoot always be the last one
 
-	for i, item := range pathMapList {
-		log.Printf("URL ALIAS: %s <= %s (%s)\n", item.URL, item.Path, item.OrigPath)
-		item.FS = &fasthttp.FS{
-			Root:               string(item.Path),
-			IndexNames:         []string{"index.html"},
-			GenerateIndexPages: *generateIndexPages,
-			Compress:           *compress,
-			AcceptByteRange:    *byteRange,
-		}
-		if *vhost {
-			item.FS.PathRewrite = fasthttp.NewVHostPathRewriter(0)
-		}
-		// check order is important
-		if i == len(pathMapList)-1 {
-			// last one
-			item.FS.PathNotFound = fsPathNotFoundHandler
-			continue
-		}
-		if i == 0 {
-			// first, if there is only one, will not match here
-			item.FS.PathNotFound = nil
-		} else {
-			//
-			pathMapList[i-1].FS.PathNotFound = item.FS.NewRequestHandler()
-		}
-	}
+	*docRoot, _ = filepath.Abs(*docRoot)
 
-	// first handler in list
-	fsHandler := pathMapList[0].FS.NewRequestHandler()
+	*pathMap = utils.LoopReplaceAll(*pathMap, " ", ",")
+	*pathMap = filepath.Clean(*pathMap)
+
+	*pathMap = *pathMap + "," + "*@:/:" + *docRoot
+
+	fsHandler := magicgate.NewRewritetHandler(*pathMap, fsPathNotFoundHandler)
 
 	// TODO: test path map
 
@@ -372,6 +361,7 @@ func main() {
 
 	// check domain acl
 	fileServiceHandler := srv.ServerHandler(func(ctx *fasthttp.RequestCtx) {
+
 		fsHandler(ctx)
 		updateFSCounters(ctx)
 	})

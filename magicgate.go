@@ -19,10 +19,60 @@ import (
 
 // PathMapEntry record a path to URL mapping
 type PathMapEntry struct {
+	Domain   string
 	URL      []byte
 	Path     []byte
 	OrigPath []byte
 	FS       *fasthttp.FS
+}
+
+type HttpRewriter struct {
+	pathMapList  []*PathMapEntry
+	domainList   []string
+	pathNotFound fasthttp.RequestHandler
+	handler      fasthttp.RequestHandler
+}
+
+// NewRewritetHandler return a RequestHandler which will handle file access
+func NewRewritetHandler(pathMap string, pathNotFound fasthttp.RequestHandler) fasthttp.RequestHandler {
+	rw := &HttpRewriter{
+		pathMapList: []*PathMapEntry{},
+		domainList:  []string{},
+	}
+
+	// path map
+
+	for i, item := range pathMapList {
+		log.Printf("URL ALIAS: %s <= %s (%s)\n", item.URL, item.Path, item.OrigPath)
+		item.FS = &fasthttp.FS{
+			Root:               string(item.Path),
+			IndexNames:         []string{"index.html"},
+			GenerateIndexPages: *generateIndexPages,
+			Compress:           *compress,
+			AcceptByteRange:    *byteRange,
+		}
+		if *vhost {
+			item.FS.PathRewrite = fasthttp.NewVHostPathRewriter(0)
+		}
+		// check order is important
+		if i == len(pathMapList)-1 {
+			// last one
+			item.FS.PathNotFound = fsPathNotFoundHandler
+			continue
+		}
+		if i == 0 {
+			// first, if there is only one, will not match here
+			item.FS.PathNotFound = nil
+		} else {
+			//
+			pathMapList[i-1].FS.PathNotFound = item.FS.NewRequestHandler()
+		}
+	}
+
+	rw.handler = func(ctx *fasthttp.RequestCtx) {
+
+	}
+	return rw.handler
 }
 
 // HostStat record stat of a backend host
@@ -146,7 +196,6 @@ func (h *ServerImp) ServerHostSwitchHandler(next fasthttp.RequestHandler) fastht
 		if next != nil {
 			next(ctx)
 		}
-		return
 	}
 }
 
@@ -227,7 +276,6 @@ func (h *ServerImp) ServerHandler(next fasthttp.RequestHandler) fasthttp.Request
 		if next != nil {
 			next(ctx)
 		}
-		return
 	}
 }
 
@@ -312,7 +360,7 @@ func (h *ServerImp) PrefixRedirectHandler(next fasthttp.RequestHandler) fasthttp
 
 		for _, prefix := range h.TrimList {
 			// log.Printf("PrefixRedirectHandler: trim %s vs req %s, (%s <= %s)\n", prefix, reqHost, ctx.LocalAddr(), ctx.RemoteAddr())
-			if host := bytes.TrimPrefix(reqHost, prefix); bytes.Compare(host, reqHost) != 0 {
+			if host := bytes.TrimPrefix(reqHost, prefix); !bytes.Equal(host, reqHost) {
 				// Request host has www. prefix. Redirect to host with www. trimmed.
 
 				ctx.Redirect(string(ctx.URI().Scheme())+"://"+string(host)+string(ctx.RequestURI()), fasthttp.StatusFound)
@@ -325,7 +373,6 @@ func (h *ServerImp) PrefixRedirectHandler(next fasthttp.RequestHandler) fasthttp
 		if next != nil {
 			next(ctx)
 		}
-		return
 	}
 }
 
@@ -335,7 +382,7 @@ func (h *ServerImp) RedirectToTLSHandler() fasthttp.RequestHandler {
 		log.Printf("RedirectToTLSHandler(%s <= %s), requested path is %q(%q). LastURI is %q. Counter is %d", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.Path(), ctx.Request.URI().String(), h.LastURI, h.Counter)
 
 		// Todo: should we check this ?
-		if bytes.Compare(ctx.URI().Scheme(), []byte("https")) == 0 {
+		if bytes.Equal(ctx.URI().Scheme(), []byte("https")) {
 			log.Fatalf("can not use RedirectToTLSHandler with tls/https requests")
 		}
 
@@ -363,7 +410,6 @@ func (h *ServerImp) RedirectToTLSHandler() fasthttp.RequestHandler {
 		ctx.Redirect("https://"+newhost+string(ctx.RequestURI()), fasthttp.StatusFound)
 		ctx.SetUserValue("MagicRedirect", "tls")
 		log.Printf("RedirectToTLSHandler(%s <= %s), redirected to %q\n", ctx.LocalAddr(), ctx.RemoteAddr(), "https://"+newhost+string(ctx.RequestURI()))
-		return
 	}
 }
 
@@ -386,7 +432,6 @@ func (h *ServerImp) MagicServerImp(redirect, next fasthttp.RequestHandler) fasth
 		if next != nil {
 			next(ctx)
 		}
-		return
 	}
 }
 

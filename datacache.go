@@ -311,8 +311,6 @@ func (dc *DataCache) DataCacheSetKVHandler() fasthttp.RequestHandler {
 			log.Printf(msg + ", OK\n")
 			ctx.SetStatusCode(fasthttp.StatusOK)
 		}
-
-		return
 	}
 }
 
@@ -355,8 +353,6 @@ func (dc *DataCache) DataCacheGetKVHandler() fasthttp.RequestHandler {
 			log.Printf(msg + ", OK\n")
 			ctx.SetStatusCode(fasthttp.StatusOK)
 		}
-
-		return
 	}
 }
 
@@ -447,7 +443,6 @@ func (dc *DataCache) DataCacheListKVHandler() fasthttp.RequestHandler {
 				ctx.SetStatusCode(fasthttp.StatusOK)
 			}
 		}
-		return
 	}
 }
 
@@ -458,8 +453,6 @@ func (dc *DataCache) DataCacheJSONHandler() fasthttp.RequestHandler {
 
 		dc.mux.Lock()
 		defer dc.mux.Unlock()
-		// Todo
-		return
 	}
 }
 
@@ -470,8 +463,6 @@ func (dc *DataCache) JSONContentHandler() fasthttp.RequestHandler {
 
 		dc.mux.Lock()
 		defer dc.mux.Unlock()
-		// Todo
-		return
 	}
 }
 
@@ -525,7 +516,5 @@ func (dc *DataCache) DataCacheSetProxyHandler() fasthttp.RequestHandler {
 			log.Printf(msg + ", OK\n")
 			ctx.SetStatusCode(fasthttp.StatusOK)
 		}
-
-		return
 	}
 }
