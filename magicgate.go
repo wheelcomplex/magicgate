@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,38 +28,86 @@ type PathMapEntry struct {
 	FS       *fasthttp.FS
 }
 
-type HttpRewriter struct {
-	pathMapList  []*PathMapEntry
-	domainList   []string
+// httpRewriter used to implement request rewrite
+type httpRewriter struct {
+	pathMapList  []*PathMapEntry // will apply in input order
 	pathNotFound fasthttp.RequestHandler
 	handler      fasthttp.RequestHandler
 }
 
-// NewRewritetHandler return a RequestHandler which will handle file access
-func NewRewritetHandler(pathMap string, pathNotFound fasthttp.RequestHandler) fasthttp.RequestHandler {
-	rw := &HttpRewriter{
-		pathMapList: []*PathMapEntry{},
-		domainList:  []string{},
+// NewAliasHandler return a RequestHandler which will handle file access
+func NewAliasHandler(pathMap string, docRoot string, vhost, generateIndexPages, compress, byteRange bool, pathNotFound fasthttp.RequestHandler) fasthttp.RequestHandler {
+
+	var err error
+	docRoot, err = filepath.Abs(docRoot)
+	if err != nil {
+		log.Fatalf("Invalid doc root for NewRewriterHandler: %s, %s\n", docRoot, err)
 	}
 
-	// path map
+	// put docroot at the end of list,
 
-	for i, item := range pathMapList {
+	pathMap = pathMap + "," + "*@:/:" + docRoot
+
+	pathMap = strings.Trim(pathMap, ", ")
+
+	rw := &httpRewriter{
+		pathMapList: make([]*PathMapEntry, 4),
+	}
+
+	for _, item := range strings.Split(pathMap, ",") {
+		// URL path : file system path, --pathMap=[wildcard domain@]/alias/for/abs:/abspath,/relative/pathmap:./cwdpath
+
+		pairs := strings.Split(item, ":")
+		if len(pairs) != 2 {
+			log.Printf("Invalid path map: %s\n", item)
+			continue
+		}
+		fsPath := filepath.Clean(pairs[1])
+		if !filepath.IsAbs(fsPath) {
+			fsPath = docRoot + string(os.PathSeparator) + fsPath
+		}
+
+		// remove invalid @
+		url := strings.Trim(pairs[0], "@")
+
+		domain := ""
+		p := strings.Index(url, "@")
+		if p == -1 {
+			domain = "*"
+		} else {
+			domain = url[0:p]
+			url = url[p+1:]
+		}
+		if len(url) == 0 || len(fsPath) == 0 {
+			log.Printf("Invalid path map: %s\n", item)
+			continue
+		}
+
+		rw.pathMapList = append(rw.pathMapList, &PathMapEntry{
+			Domain:   domain,
+			URL:      []byte(url),
+			Path:     []byte(fsPath),
+			OrigPath: []byte(pairs[1]),
+		})
+	}
+
+	// FS
+	for i, item := range rw.pathMapList {
 		log.Printf("URL ALIAS: %s <= %s (%s)\n", item.URL, item.Path, item.OrigPath)
 		item.FS = &fasthttp.FS{
 			Root:               string(item.Path),
-			IndexNames:         []string{"index.html"},
-			GenerateIndexPages: *generateIndexPages,
-			Compress:           *compress,
-			AcceptByteRange:    *byteRange,
+			IndexNames:         []string{"index.html", "index.htm"},
+			GenerateIndexPages: generateIndexPages,
+			Compress:           compress,
+			AcceptByteRange:    byteRange,
 		}
-		if *vhost {
+		if vhost {
 			item.FS.PathRewrite = fasthttp.NewVHostPathRewriter(0)
 		}
 		// check order is important
-		if i == len(pathMapList)-1 {
+		if i == len(rw.pathMapList)-1 {
 			// last one
-			item.FS.PathNotFound = fsPathNotFoundHandler
+			item.FS.PathNotFound = pathNotFound
 			continue
 		}
 		if i == 0 {
@@ -65,13 +115,13 @@ func NewRewritetHandler(pathMap string, pathNotFound fasthttp.RequestHandler) fa
 			item.FS.PathNotFound = nil
 		} else {
 			//
-			pathMapList[i-1].FS.PathNotFound = item.FS.NewRequestHandler()
+			rw.pathMapList[i-1].FS.PathNotFound = item.FS.NewRequestHandler()
 		}
 	}
 
-	rw.handler = func(ctx *fasthttp.RequestCtx) {
+	// first
+	rw.handler = rw.pathMapList[0].FS.NewRequestHandler()
 
-	}
 	return rw.handler
 }
 
@@ -310,8 +360,8 @@ func (h *ServerImp) FastHTTPChallengeHandler(am *certmagic.ACMEManager, next fas
 	}
 }
 
-// purifyHandler purify ctx,
-// return true when the request has been done.
+// purifyHandler purify ctx, check for invalid requests,
+// return true when the request has been terminated.
 func (h *ServerImp) purifyHandler(ctx *fasthttp.RequestCtx) bool {
 
 	reqHost := ctx.Host()
@@ -324,16 +374,33 @@ func (h *ServerImp) purifyHandler(ctx *fasthttp.RequestCtx) bool {
 		// not port come with request host
 		aclhost = string(reqHost)
 		aclport = ""
-	} else if aclport == "80" {
+	} else if (aclport == "443" && ctx.IsTLS()) || (aclport == "80" && ctx.IsTLS() == false) {
 		aclport = ""
 	} else {
 		aclport = ":" + aclport
 	}
+	// no host header, we do not want to handle this.
+	if len(aclhost) == 0 {
+		// redirect to localhost
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.SetUserValue("ctxMagicInfo", "forge-localhost")
+		log.Printf("purifyHandler: host %s, (%s <= %s), denied to %q\n", "forge-localhost", ctx.LocalAddr(), ctx.RemoteAddr(), string(ctx.URI().Scheme())+"://"+string("127.0.0.1")+aclport+string(ctx.RequestURI()))
+		return true
+	}
 	if strings.Compare(aclhost, "0.0.0.0") == 0 {
 		// redirect to localhost
 		ctx.Redirect(string(ctx.URI().Scheme())+"://"+string("127.0.0.1")+aclport+string(ctx.RequestURI()), fasthttp.StatusFound)
-		ctx.SetUserValue("MagicRedirect", "0.0.0.0")
+		ctx.SetUserValue("ctxMagicInfo", "rdr-0.0.0.0")
 		log.Printf("purifyHandler: host %s, (%s <= %s), redirected to %q\n", "0.0.0.0", ctx.LocalAddr(), ctx.RemoteAddr(), string(ctx.URI().Scheme())+"://"+string("127.0.0.1")+aclport+string(ctx.RequestURI()))
+		return true
+	}
+	// connected from outside but has "Host: 127.0.0.1" or "Host: localhost" header,
+	// Todo: check ipv6
+	if ctx.RemoteIP().Equal(net.IPv4(127, 0, 0, 1)) == false && (strings.Compare(aclhost, "127.0.0.1") == 0 || strings.Compare(aclhost, "localhost") == 0) {
+		// redirect to localhost
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.SetUserValue("ctxMagicInfo", "forge-localhost")
+		log.Printf("purifyHandler: host %s, (%s <= %s), denied to %q\n", "forge-localhost", ctx.LocalAddr(), ctx.RemoteAddr(), string(ctx.URI().Scheme())+"://"+string("127.0.0.1")+aclport+string(ctx.RequestURI()))
 		return true
 	}
 	return false
@@ -364,7 +431,7 @@ func (h *ServerImp) PrefixRedirectHandler(next fasthttp.RequestHandler) fasthttp
 				// Request host has www. prefix. Redirect to host with www. trimmed.
 
 				ctx.Redirect(string(ctx.URI().Scheme())+"://"+string(host)+string(ctx.RequestURI()), fasthttp.StatusFound)
-				ctx.SetUserValue("MagicRedirect", prefix)
+				ctx.SetUserValue("ctxMagicInfo", "host-trim-"+string(prefix))
 				log.Printf("PrefixRedirectHandler: trim %s, (%s <= %s), redirected to %q\n", prefix, ctx.LocalAddr(), ctx.RemoteAddr(), string(ctx.URI().Scheme())+"://"+string(host)+string(ctx.RequestURI()))
 				return
 			}
@@ -408,7 +475,7 @@ func (h *ServerImp) RedirectToTLSHandler() fasthttp.RequestHandler {
 
 		// https always run on port 443
 		ctx.Redirect("https://"+newhost+string(ctx.RequestURI()), fasthttp.StatusFound)
-		ctx.SetUserValue("MagicRedirect", "tls")
+		ctx.SetUserValue("ctxMagicInfo", "rdr-to-tls")
 		log.Printf("RedirectToTLSHandler(%s <= %s), redirected to %q\n", ctx.LocalAddr(), ctx.RemoteAddr(), "https://"+newhost+string(ctx.RequestURI()))
 	}
 }
@@ -424,8 +491,9 @@ func (h *ServerImp) PrefixTLSRedirectHandler() fasthttp.RequestHandler {
 func (h *ServerImp) MagicServerImp(redirect, next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
 		redirect(ctx)
-		rdr := ctx.UserValue("MagicRedirect")
-		if rdr != nil {
+		rdr := ctx.UserValue("ctxMagicInfo")
+		// all redirected ctx has a ctxMagicInfo value which start with "rdr-" + reason
+		if rdr != nil && bytes.HasPrefix(rdr.([]byte), []byte("rdr-")) {
 			log.Printf("MagicServerImp: %s, (%s <= %s)\n", rdr.([]byte), ctx.LocalAddr(), ctx.RemoteAddr())
 			return
 		}

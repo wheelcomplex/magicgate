@@ -274,6 +274,8 @@ func (dc *DataCache) checkToken(ctx *fasthttp.RequestCtx) (tk string, uid uint64
 // tlsRouter.GET("/api/db/set/:token/:key/:value", dc.DataCacheSetKVHandler())
 func (dc *DataCache) DataCacheSetKVHandler() fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
+		//
+		ctx.Request.Header.Set("Cache-Control", "no-cache")
 
 		dc.mux.Lock()
 		defer dc.mux.Unlock()
@@ -322,6 +324,9 @@ func (dc *DataCache) DataCacheGetKVHandler() fasthttp.RequestHandler {
 		dc.mux.Lock()
 		defer dc.mux.Unlock()
 
+		//
+		ctx.Request.Header.Set("Cache-Control", "no-cache")
+
 		// check token
 		tk, uid, ok := dc.checkToken(ctx)
 		if !ok {
@@ -360,6 +365,8 @@ func (dc *DataCache) DataCacheGetKVHandler() fasthttp.RequestHandler {
 // tlsRouter.GET("/api/db/list/:token/:key", dc.DataCacheListKVHandler())
 func (dc *DataCache) DataCacheListKVHandler() fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
+		//
+		ctx.Request.Header.Set("Cache-Control", "no-cache")
 
 		dc.mux.Lock()
 		defer dc.mux.Unlock()
@@ -450,6 +457,8 @@ func (dc *DataCache) DataCacheListKVHandler() fasthttp.RequestHandler {
 func (dc *DataCache) DataCacheJSONHandler() fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
 		log.Printf("DataCacheHandler(%s <= %s), requested path is %q(%q).", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.Path(), ctx.Request.URI().String())
+		//
+		ctx.Request.Header.Set("Cache-Control", "no-cache")
 
 		dc.mux.Lock()
 		defer dc.mux.Unlock()
@@ -460,6 +469,8 @@ func (dc *DataCache) DataCacheJSONHandler() fasthttp.RequestHandler {
 func (dc *DataCache) JSONContentHandler() fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
 		log.Printf("JSONContentHandler(%s <= %s), requested path is %q(%q).", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.Path(), ctx.Request.URI().String())
+		//
+		ctx.Request.Header.Set("Cache-Control", "no-cache")
 
 		dc.mux.Lock()
 		defer dc.mux.Unlock()
@@ -471,6 +482,7 @@ func (dc *DataCache) JSONContentHandler() fasthttp.RequestHandler {
 func (dc *DataCache) ProxyAuthHandler() multiproxy.ProxyAuthHandler {
 	return func(ctx *multiproxy.ProxyCtx) error {
 		log.Printf("ProxyAuthHandler(%s <= %s), auth %s\n", ctx.LocalAddr(), ctx.RemoteAddr(), ctx.AuthInfo)
+
 		return nil
 	}
 }
@@ -479,6 +491,8 @@ func (dc *DataCache) ProxyAuthHandler() multiproxy.ProxyAuthHandler {
 // tlsRouter.GET("/api/db/setproxy/:token/:key/:value", dc.DataCacheSetKVHandler())
 func (dc *DataCache) DataCacheSetProxyHandler() fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
+		//
+		ctx.Request.Header.Set("Cache-Control", "no-cache")
 
 		dc.mux.Lock()
 		defer dc.mux.Unlock()

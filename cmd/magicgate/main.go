@@ -39,6 +39,12 @@ import (
 	"golang.org/x/crypto/acme"
 )
 
+// host rewrite
+/*
+www.* => domain.com,
+domain.com=> www.domain.com
+regex => replace
+*/
 var (
 	proxyList          = flag.String("proxylist", "", "tcp/udp proxy, list format: <tcp|udp>:<frontend address>:<backend address|passive token>, address should be host:port, \npassive token use for backend connect to frontend")
 	ctrlToken          = flag.String("ctrltoken", "", "a token to control server from client, URI: /api/ctrl/shutdown/*token")
@@ -165,45 +171,6 @@ func main() {
 		log.Printf("TRIM HOST PREFIX: %s\n", item)
 	}
 
-	// pathMap
-	var pathMapList = []*magicgate.PathMapEntry{}
-
-	for _, item := range strings.Split(*pathMap, ",") {
-		// URL path : file system path, --pathMap=[wildcard domain@]/alias/for/abs:/abspath,/relative/pathmap:./cwdpath
-
-		pairs := strings.Split(item, ":")
-		if len(pairs) != 2 {
-			log.Printf("Invalid path map: %s\n", item)
-			continue
-		}
-		fsPath := filepath.Clean(pairs[1])
-		if !filepath.IsAbs(fsPath) {
-			fsPath = *docRoot + string(os.PathSeparator) + fsPath
-		}
-
-		// remove invalid @
-		url := strings.Trim(pairs[0], "@")
-
-		domain := ""
-		p := strings.Index(url, "@")
-		if p == -1 {
-			domain = "*"
-		} else {
-			domain = url[0:p]
-			url = url[p+1:]
-		}
-		if len(url) == 0 || len(fsPath) == 0 {
-			log.Printf("Invalid path map: %s\n", item)
-			continue
-		}
-		pathMapList = append(pathMapList, &magicgate.PathMapEntry{
-			Domain:   domain,
-			URL:      []byte(url),
-			Path:     []byte(fsPath),
-			OrigPath: []byte(pairs[1]),
-		})
-	}
-
 	//
 	srv := &magicgate.ServerImp{
 		Counter:           1,
@@ -230,9 +197,7 @@ func main() {
 	*pathMap = utils.LoopReplaceAll(*pathMap, " ", ",")
 	*pathMap = filepath.Clean(*pathMap)
 
-	*pathMap = *pathMap + "," + "*@:/:" + *docRoot
-
-	fsHandler := magicgate.NewRewritetHandler(*pathMap, fsPathNotFoundHandler)
+	fsHandler := magicgate.NewAliasHandler(*pathMap, *docRoot, *vhost, *generateIndexPages, *compress, *byteRange, fsPathNotFoundHandler)
 
 	// TODO: test path map
 
